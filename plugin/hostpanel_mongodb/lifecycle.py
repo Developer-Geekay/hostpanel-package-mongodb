@@ -16,9 +16,11 @@ SERVICE_NAME = "hostpanel-mongodb"
 SERVICE_DST  = f"/etc/systemd/system/{SERVICE_NAME}.service"
 SUDOERS_DST  = "/etc/sudoers.d/hostpanel-mongodb"
 
-BINARIES_REPO       = "https://github.com/Developer-Geekay/hostpanel-binaries"
-MONGODB_BIN_VERSION = "8.0.4"
-PRIMARY_ARCH        = "aarch64"
+BINARIES_REPO         = "https://github.com/Developer-Geekay/hostpanel-binaries"
+MONGODB_BIN_VERSION   = "8.0.4"
+MONGODB_TOOLS_VERSION = "100.10.0"
+PRIMARY_ARCH          = "aarch64"
+TOOLS = ("mongodump", "mongorestore")
 
 
 def _run(cmd, timeout=60):
@@ -38,6 +40,31 @@ def _mongod_ready():
 
 def _service_active():
     return _run(["sudo", "-n", "systemctl", "is-active", SERVICE_NAME]).returncode == 0
+
+
+def _tools_ready():
+    return all(
+        os.path.isfile(f"{MONGO_DIR}/{t}") and os.access(f"{MONGO_DIR}/{t}", os.X_OK)
+        for t in TOOLS
+    )
+
+
+def _download_tools():
+    for tool in TOOLS:
+        url = f"{BINARIES_REPO}/releases/download/mongodb-tools-{MONGODB_TOOLS_VERSION}/{tool}-{PRIMARY_ARCH}"
+        dst = f"{MONGO_DIR}/{tool}"
+        logger.info("Downloading %s %s (%s)", tool, MONGODB_TOOLS_VERSION, PRIMARY_ARCH)
+        r = subprocess.run(
+            ["curl", "-fsSL", "-o", dst, url],
+            capture_output=True, text=True, timeout=300,
+        )
+        if r.returncode != 0:
+            if os.path.exists(dst):
+                os.remove(dst)
+            logger.warning("Failed to download %s: %s", tool, r.stderr.strip() or r.stdout.strip())
+            return
+        os.chmod(dst, 0o755)
+        logger.info("%s downloaded to %s", tool, dst)
 
 
 def _download_mongod():
@@ -117,6 +144,9 @@ def on_install():
 
     if not _mongod_ready():
         _download_mongod()
+
+    if not _tools_ready():
+        _download_tools()
 
     _write_config()
     _install_service()
