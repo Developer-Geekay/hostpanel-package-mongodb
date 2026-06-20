@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="hostpanel-mongodb",
-    version="1.0.4",
+    version="1.0.5",
     packages=find_packages(),
     install_requires=["fastapi", "pydantic", "pymongo"],
     entry_points={

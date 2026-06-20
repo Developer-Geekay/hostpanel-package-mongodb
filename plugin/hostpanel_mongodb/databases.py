@@ -85,7 +85,6 @@ async def create_database(body: CreateDbRequest, _: User = Depends(require_admin
             raise HTTPException(409, f"Database '{name}' already exists.")
         db = c[name]
         db.create_collection("_init")
-        db["_init"].drop()
         return {"ok": True, "name": name}
     except HTTPException:
         raise
