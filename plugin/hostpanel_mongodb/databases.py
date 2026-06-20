@@ -1,11 +1,14 @@
+import io
 import logging
 import os
 import re
 import subprocess
+import tarfile
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth import User
@@ -131,7 +134,7 @@ async def drop_database(name: str, _: User = Depends(require_admin)):
     try:
         # Revoke roles scoped to this database from all users; preserve the users themselves
         try:
-            all_users = c.admin.command("usersInfo", 1)
+            all_users = c.admin.command("usersInfo", {"forAllDBs": True})
             for u in all_users.get("users", []):
                 roles_to_revoke = [
                     r for r in u.get("roles", [])
@@ -177,7 +180,7 @@ async def clear_database(name: str, _: User = Depends(require_admin)):
 async def list_all_users(_: User = Depends(require_admin)):
     c = _client()
     try:
-        result = c.admin.command("usersInfo", 1)
+        result = c.admin.command("usersInfo", {"forAllDBs": True})
         users = []
         for u in result.get("users", []):
             if u.get("db") in SYSTEM_DBS:
@@ -388,6 +391,32 @@ async def restore_backup(body: RestoreRequest, _: User = Depends(require_admin))
         return {"ok": True}
     except subprocess.TimeoutExpired:
         raise HTTPException(500, "Restore timed out.")
+
+
+@router.get("/backups/{name}/download")
+async def download_backup(name: str, _: User = Depends(require_admin)):
+    if ".." in name or "/" in name:
+        raise HTTPException(400, "Invalid backup name.")
+    backup_path = os.path.join(BACKUP_DIR, name)
+    if not os.path.isdir(backup_path):
+        raise HTTPException(404, "Backup not found.")
+
+    def generate():
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            tar.add(backup_path, arcname=name)
+        buf.seek(0)
+        while True:
+            chunk = buf.read(65536)
+            if not chunk:
+                break
+            yield chunk
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="{name}.tar.gz"'},
+    )
 
 
 @router.delete("/backups/{name}")
