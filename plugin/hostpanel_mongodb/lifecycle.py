@@ -56,13 +56,9 @@ def _download_mongod():
 
 
 def _write_config():
-    if os.path.exists(CONF_FILE):
-        return
     config = f"""\
 storage:
   dbPath: {DATA_DIR}
-  journal:
-    enabled: true
 
 systemLog:
   destination: file
