@@ -100,6 +100,10 @@ async def drop_database(name: str, _: User = Depends(require_admin)):
         raise HTTPException(400, "Cannot drop a system database.")
     c = _client()
     try:
+        try:
+            c[name].command("dropAllUsersFromDatabase")
+        except Exception:
+            pass
         c.drop_database(name)
         return {"ok": True}
     except Exception as e:
