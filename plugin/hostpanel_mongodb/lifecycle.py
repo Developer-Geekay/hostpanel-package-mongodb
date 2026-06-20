@@ -1,5 +1,6 @@
 import logging
 import os
+import pwd
 import subprocess
 
 from fastapi import HTTPException
@@ -22,6 +23,13 @@ PRIMARY_ARCH        = "aarch64"
 
 def _run(cmd, timeout=60):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _get_service_user():
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        return "root"
 
 
 def _mongod_ready():
@@ -81,24 +89,28 @@ processManagement:
 def _install_service():
     if os.path.exists(SERVICE_DST):
         return
-    src_candidates = [
-        os.path.join(MONGO_DIR, "service", f"{SERVICE_NAME}.service"),
-        os.path.join(os.path.dirname(__file__), f"{SERVICE_NAME}.service"),
-    ]
-    content = None
-    for src in src_candidates:
-        if os.path.exists(src):
-            with open(src) as f:
-                content = f.read()
-            break
-    if content is None:
-        logger.warning("Service file not found; skipping service install")
-        return
+    service_user = _get_service_user()
+    content = f"""\
+[Unit]
+Description=HostPanel MongoDB
+After=network.target
+
+[Service]
+Type=simple
+User={service_user}
+ExecStart={MONGOD_BIN} --config {CONF_FILE}
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=64000
+
+[Install]
+WantedBy=multi-user.target
+"""
     r = subprocess.run(["sudo", "-n", "tee", SERVICE_DST],
                        input=content, text=True, capture_output=True)
     if r.returncode == 0:
         subprocess.run(["sudo", "-n", "chmod", "644", SERVICE_DST], capture_output=True)
-        logger.info("Installed %s", SERVICE_DST)
+        logger.info("Installed %s (User=%s)", SERVICE_DST, service_user)
     else:
         logger.warning("Could not install service file: %s", r.stderr.strip())
 
