@@ -19,7 +19,7 @@ jobs:
 
       - name: Build zip
         run: |
-          chmod +x build.sh bin/setup-mongodb
+          chmod +x build.sh
           ./build.sh
           ZIP="hostpanel-mongodb-${{ steps.version.outputs.VERSION }}.zip"
           test -f "$ZIP"
