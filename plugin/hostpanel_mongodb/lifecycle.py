@@ -87,8 +87,6 @@ processManagement:
 
 
 def _install_service():
-    if os.path.exists(SERVICE_DST):
-        return
     service_user = _get_service_user()
     content = f"""\
 [Unit]
