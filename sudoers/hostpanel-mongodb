@@ -1,0 +1,21 @@
+# HostPanel MongoDB plugin sudoers
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/systemctl start hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/systemctl stop hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/systemctl restart hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/systemctl enable hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/systemctl disable hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/systemctl is-active hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+%hostpanel ALL=(root) NOPASSWD: /bin/systemctl start hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /bin/systemctl stop hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /bin/systemctl restart hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /bin/systemctl enable hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /bin/systemctl disable hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /bin/systemctl is-active hostpanel-mongodb
+%hostpanel ALL=(root) NOPASSWD: /bin/systemctl daemon-reload
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/tee /opt/hostpanel/plugins/mongodb/mongod.conf
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/tee /etc/systemd/system/hostpanel-mongodb.service
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/chmod 644 /etc/systemd/system/hostpanel-mongodb.service
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/rm -f /etc/systemd/system/hostpanel-mongodb.service
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/rm -rf /opt/hostpanel/plugins/mongodb
+%hostpanel ALL=(root) NOPASSWD: /usr/bin/rm -f /etc/sudoers.d/hostpanel-mongodb

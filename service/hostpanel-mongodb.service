@@ -1,0 +1,14 @@
+[Unit]
+Description=HostPanel MongoDB
+After=network.target
+
+[Service]
+Type=simple
+User=hostpanel
+ExecStart=/opt/hostpanel/plugins/mongodb/mongod --config /opt/hostpanel/plugins/mongodb/mongod.conf
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=64000
+
+[Install]
+WantedBy=multi-user.target
