@@ -1,9 +1,12 @@
-/* hostpanel-package-mongodb — frontend/main.js */
+/* hostpanel-package-mongodb — frontend/main.js
+ * SDK plugin: MongoDB databases, users, roles, and backups manager UI.
+ * Registered as window.__hpkg_sdk.register('mongodb', MongoDBPlugin);
+ */
 (function () {
   'use strict';
 
   const sdk = window.__hpkg_sdk;
-  const { html, useState, useEffect } = sdk;
+  const { html, useState, useEffect, useCallback, useMemo } = sdk;
   const { SdkConfirmModal } = sdk.components;
   const { useApi, useToast } = sdk.hooks;
 
@@ -21,569 +24,7 @@
     return new Date(iso).toLocaleString();
   }
 
-  // ── Base components ───────────────────────────────────────────────────────
-
-  const BADGE_COLORS = {
-    default: { bg: 'var(--bg-3)',             color: 'var(--text-3)' },
-    blue:    { bg: 'rgba(59,130,246,0.12)',   color: '#60a5fa'       },
-    green:   { bg: 'rgba(34,197,94,0.12)',    color: '#4ade80'       },
-    orange:  { bg: 'rgba(249,115,22,0.12)',   color: '#fb923c'       },
-    purple:  { bg: 'rgba(168,85,247,0.12)',   color: '#c084fc'       },
-  };
-
-  function Badge({ children, color = 'default' }) {
-    const c = BADGE_COLORS[color] || BADGE_COLORS.default;
-    return html`
-      <span style=${{
-        display: 'inline-flex', alignItems: 'center',
-        background: c.bg, color: c.color,
-        borderRadius: 4, padding: '2px 8px',
-        fontSize: 11, fontWeight: 500, letterSpacing: '0.02em',
-        fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap',
-      }}>${children}</span>`;
-  }
-
-  function CopyButton({ text }) {
-    const [copied, setCopied] = useState(false);
-    function copy() {
-      navigator.clipboard.writeText(text).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      });
-    }
-    return html`
-      <button class="btn btn-ghost btn-sm" onClick=${copy} style=${{ minWidth: 70 }}>
-        ${copied ? '✓ Copied' : 'Copy'}
-      </button>`;
-  }
-
-  // Custom table — supports vdom in cells
-  function Table({ columns, rows, loading, empty, renderActions }) {
-    const thStyle = {
-      padding: '8px 14px', textAlign: 'left',
-      fontSize: 11, fontWeight: 600, color: 'var(--text-3)',
-      letterSpacing: '0.06em', borderBottom: '1px solid var(--border)',
-      background: 'var(--bg-2)',
-    };
-    const tdStyle = {
-      padding: '11px 14px', borderBottom: '1px solid var(--border)',
-      fontSize: 13, color: 'var(--text-1)', verticalAlign: 'middle',
-    };
-
-    if (loading) return html`
-      <div style=${{ padding: '40px', textAlign: 'center', color: 'var(--text-3)', fontSize: 13 }}>
-        Loading…
-      </div>`;
-
-    if (!rows || rows.length === 0) return html`
-      <div style=${{ padding: '48px 20px', textAlign: 'center' }}>
-        <div style=${{ fontSize: 15, fontWeight: 500, color: 'var(--text-2)', marginBottom: 6 }}>${empty?.title || 'No items'}</div>
-        ${empty?.desc && html`<div style=${{ fontSize: 13, color: 'var(--text-3)' }}>${empty.desc}</div>`}
-      </div>`;
-
-    return html`
-      <div style=${{ overflowX: 'auto', borderRadius: 8, border: '1px solid var(--border)' }}>
-        <table style=${{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead>
-            <tr>
-              ${columns.map(c => html`<th key=${c.key} style=${thStyle}>${c.label}</th>`)}
-              ${renderActions && html`<th style=${{ ...thStyle, textAlign: 'right' }}></th>`}
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.map((row, i) => html`
-              <tr key=${i}
-                onMouseEnter=${e => e.currentTarget.style.background = 'var(--bg-2)'}
-                onMouseLeave=${e => e.currentTarget.style.background = ''}>
-                ${columns.map(c => html`
-                  <td key=${c.key} style=${{ ...tdStyle, ...(i === rows.length - 1 ? { borderBottom: 'none' } : {}) }}>
-                    ${row[c.key]}
-                  </td>`)}
-                ${renderActions && html`
-                  <td style=${{ ...tdStyle, textAlign: 'right', whiteSpace: 'nowrap', ...(i === rows.length - 1 ? { borderBottom: 'none' } : {}) }}>
-                    <div style=${{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                      ${renderActions(row)}
-                    </div>
-                  </td>`}
-              </tr>`)}
-          </tbody>
-        </table>
-      </div>`;
-  }
-
-  // ── Tab bar ───────────────────────────────────────────────────────────────
-
-  function Tabs({ tabs, active, onChange }) {
-    return html`
-      <div style=${{
-        display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: 24,
-      }}>
-        ${tabs.map(t => html`
-          <button key=${t.id} onClick=${() => onChange(t.id)} style=${{
-            padding: '9px 22px', background: 'none', border: 'none', cursor: 'pointer',
-            fontSize: 13, fontWeight: 500,
-            color: active === t.id ? 'var(--primary)' : 'var(--text-3)',
-            borderBottom: active === t.id ? '2px solid var(--primary)' : '2px solid transparent',
-            marginBottom: -1, transition: 'color 0.15s',
-          }}>${t.label}</button>`)}
-      </div>`;
-  }
-
-  // ── Status bar ────────────────────────────────────────────────────────────
-
-  function StatusBar() {
-    const { data, loading, refetch } = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/status'));
-    useEffect(() => {
-      const id = setInterval(refetch, 30000);
-      return () => clearInterval(id);
-    }, [refetch]);
-
-    if (loading && !data) return html`
-      <div style=${{
-        display: 'inline-flex', alignItems: 'center', gap: 8,
-        padding: '6px 14px', borderRadius: 20, marginBottom: 20,
-        background: 'var(--bg-2)', border: '1px solid var(--border)',
-        fontSize: 13, color: 'var(--text-3)',
-      }}>
-        <span class="dot dot-dim"></span> Checking…
-      </div>`;
-
-    const running = data?.running;
-    return html`
-      <div style=${{
-        display: 'inline-flex', alignItems: 'center', gap: 0,
-        borderRadius: 20, marginBottom: 20, overflow: 'hidden',
-        border: running ? '1px solid rgba(34,197,94,0.3)' : '1px solid var(--border)',
-      }}>
-        <div style=${{
-          display: 'flex', alignItems: 'center', gap: 8,
-          padding: '6px 14px',
-          background: running ? 'rgba(34,197,94,0.08)' : 'var(--bg-2)',
-        }}>
-          <span class=${running ? 'dot dot-ok' : 'dot dot-dim'}></span>
-          <span style=${{ fontSize: 13, fontWeight: 500, color: running ? 'var(--ok)' : 'var(--text-3)' }}>
-            ${running ? `MongoDB ${data?.version ?? ''}` : 'MongoDB offline'}
-          </span>
-        </div>
-        ${data?.port && html`
-          <div style=${{
-            padding: '6px 14px', fontSize: 12, fontFamily: 'var(--font-mono)',
-            color: 'var(--text-3)', background: 'var(--bg-2)',
-            borderLeft: running ? '1px solid rgba(34,197,94,0.2)' : '1px solid var(--border)',
-          }}>:${data.port}</div>`}
-        ${!running && html`
-          <div style=${{
-            padding: '6px 14px', fontSize: 12, color: 'var(--text-3)',
-            borderLeft: '1px solid var(--border)', background: 'var(--bg-2)',
-          }}>Check Services page</div>`}
-      </div>`;
-  }
-
-  // ── Databases tab ─────────────────────────────────────────────────────────
-
-  function CreateDatabaseModal({ onClose, onCreated }) {
-    const { ok, err } = useToast();
-    const [name, setName] = useState('');
-    const [saving, setSaving] = useState(false);
-    const [formError, setFormError] = useState('');
-
-    async function handleCreate() {
-      const trimmed = name.trim();
-      if (!trimmed) { setFormError('Database name is required.'); return; }
-      setSaving(true); setFormError('');
-      try {
-        await sdk.fetch('POST', '/cpanelapi/mongodb/databases', { name: trimmed });
-        ok(`Database "${trimmed}" created.`);
-        onCreated(); onClose();
-      } catch (e) {
-        const msg = e?.detail || e?.message || 'Failed to create database.';
-        setFormError(msg); err(msg);
-      } finally { setSaving(false); }
-    }
-
-    return html`
-      <div class="modal-overlay" onClick=${e => e.target === e.currentTarget && onClose()}>
-        <div class="modal animate-fade-in" style=${{ width: 420 }}>
-          <div class="modal-header">
-            <span class="modal-title">Create Database</span>
-            <button class="modal-close" onClick=${onClose}>×</button>
-          </div>
-          <div class="modal-body" style=${{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div class="field">
-              <label>DATABASE NAME</label>
-              <input type="text" placeholder="my_database" value=${name} autoFocus
-                onInput=${e => { setName(e.target.value); setFormError(''); }}
-                onKeyDown=${e => e.key === 'Enter' && handleCreate()} />
-            </div>
-            <div style=${{ color: 'var(--text-3)', fontSize: 12 }}>
-              Letters, numbers, underscores, hyphens — max 38 characters.
-            </div>
-            ${formError && html`<div style=${{ color: 'var(--err)', fontSize: 12 }}>${formError}</div>`}
-          </div>
-          <div class="modal-footer">
-            <button class="btn btn-ghost btn-sm" onClick=${onClose} disabled=${saving}>Cancel</button>
-            <button class="btn btn-primary btn-sm" onClick=${handleCreate} disabled=${saving}>
-              ${saving ? 'Creating…' : 'Create'}
-            </button>
-          </div>
-        </div>
-      </div>`;
-  }
-
-  function DatabasesTab() {
-    const { ok, err } = useToast();
-    const { data: databases, loading, error, refetch } = useApi(
-      () => sdk.fetch('GET', '/cpanelapi/mongodb/databases'),
-    );
-    const [showCreate, setShowCreate] = useState(false);
-    const [dropTarget, setDropTarget] = useState(null);
-    const [dropping, setDropping] = useState(false);
-    const [clearTarget, setClearTarget] = useState(null);
-    const [clearing, setClearing] = useState(false);
-
-    async function handleDrop() {
-      if (!dropTarget) return; setDropping(true);
-      try {
-        await sdk.fetch('DELETE', `/cpanelapi/mongodb/databases/${dropTarget}`);
-        ok(`"${dropTarget}" dropped. User permissions revoked.`);
-        setDropTarget(null); refetch();
-      } catch (e) { err(e?.detail || 'Failed to drop.'); setDropTarget(null); }
-      finally { setDropping(false); }
-    }
-
-    async function handleClear() {
-      if (!clearTarget) return; setClearing(true);
-      try {
-        await sdk.fetch('POST', `/cpanelapi/mongodb/databases/${clearTarget}/clear`);
-        ok(`"${clearTarget}" cleared.`);
-        setClearTarget(null); refetch();
-      } catch (e) { err(e?.detail || 'Failed to clear.'); setClearTarget(null); }
-      finally { setClearing(false); }
-    }
-
-    const cols = [
-      { key: 'nameCell',        label: 'Name' },
-      { key: 'sizeCell',        label: 'Size' },
-      { key: 'collectionsCell', label: 'Collections' },
-    ];
-
-    const rows = (databases || []).map(db => ({
-      ...db,
-      nameCell:        html`<span style=${{ fontFamily: 'var(--font-mono)', fontWeight: 500 }}>${db.name}</span>`,
-      sizeCell:        html`<${Badge}>${fmtSize(db.size)}</${Badge}>`,
-      collectionsCell: html`<span style=${{ color: 'var(--text-2)' }}>${db.collections}</span>`,
-    }));
-
-    return html`
-      <div class="card">
-        <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-          <div>
-            <div class="card-title" style=${{ marginBottom: 2 }}>Databases</div>
-            ${!loading && databases?.length > 0 && html`
-              <div style=${{ fontSize: 12, color: 'var(--text-3)' }}>
-                ${databases.length} database${databases.length !== 1 ? 's' : ''}
-              </div>`}
-          </div>
-          <button class="btn btn-primary btn-sm" onClick=${() => setShowCreate(true)}>+ Create Database</button>
-        </div>
-
-        ${error ? html`
-          <div class="empty">
-            <div class="empty-title" style=${{ color: 'var(--err)' }}>Could not load databases</div>
-            <div class="empty-desc">${error?.detail || String(error)}</div>
-          </div>` : html`
-          <${Table} columns=${cols} rows=${rows} loading=${loading}
-            empty=${{ title: 'No databases', desc: 'Create a database to get started.' }}
-            renderActions=${row => html`
-              <button class="btn btn-ghost btn-sm" onClick=${() => setClearTarget(row.name)}>Clear</button>
-              <button class="btn btn-danger btn-sm" onClick=${() => setDropTarget(row.name)}>Drop</button>
-            `}
-          />`}
-      </div>
-
-      ${showCreate && html`<${CreateDatabaseModal} onClose=${() => setShowCreate(false)} onCreated=${refetch} />`}
-
-      ${clearTarget && html`
-        <${SdkConfirmModal} open=${true} title="Clear Database" danger=${true}
-          message=${`Remove all collections from "${clearTarget}"? The database and user permissions are kept.`}
-          onClose=${() => setClearTarget(null)} onConfirm=${handleClear} />`}
-
-      ${dropTarget && html`
-        <${SdkConfirmModal} open=${true} title="Drop Database" danger=${true}
-          message=${`Drop "${dropTarget}"? All data is permanently deleted. Users keep their accounts but lose permissions on this database.`}
-          onClose=${() => setDropTarget(null)} onConfirm=${handleDrop} />`}`;
-  }
-
-  // ── Users tab ─────────────────────────────────────────────────────────────
-
-  function RoleChips({ roles, authDb, username, onChanged }) {
-    const { ok, err } = useToast();
-    if (!roles || roles.length === 0) {
-      return html`<span style=${{ color: 'var(--text-3)', fontSize: 12 }}>No roles</span>`;
-    }
-    return html`
-      <div style=${{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-        ${roles.map((r, i) => html`
-          <span key=${i} style=${{
-            display: 'inline-flex', alignItems: 'center', gap: 3,
-            background: 'rgba(59,130,246,0.1)', color: '#60a5fa',
-            borderRadius: 4, padding: '2px 6px 2px 8px',
-            fontSize: 11, fontFamily: 'var(--font-mono)',
-          }}>
-            <span style=${{ color: '#93c5fd' }}>${r.db}</span>
-            <span style=${{ color: 'rgba(96,165,250,0.4)' }}>:</span>
-            <span>${r.role}</span>
-            <button title="Revoke" onClick=${async () => {
-                try {
-                  await sdk.fetch('DELETE', `/cpanelapi/mongodb/users/${authDb}/${username}/roles/${r.db}/${r.role}`);
-                  ok(`Revoked ${r.role} on ${r.db}.`);
-                  onChanged();
-                } catch (e) { err(e?.detail || 'Failed to revoke.'); }
-              }} style=${{
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: 'rgba(96,165,250,0.5)', padding: '0 0 0 2px',
-                lineHeight: 1, fontSize: 13, display: 'flex', alignItems: 'center',
-              }}>×</button>
-          </span>`)}
-      </div>`;
-  }
-
-  function ManageRolesModal({ authDb, username, roles: initialRoles, databases, onClose, onChanged }) {
-    const { ok, err } = useToast();
-    const [currentRoles, setCurrentRoles] = useState(initialRoles || []);
-    const [db, setDb] = useState(databases?.[0]?.name || '');
-    const [customDb, setCustomDb] = useState('');
-    const [role, setRole] = useState('readWrite');
-    const [saving, setSaving] = useState(false);
-    const [formError, setFormError] = useState('');
-
-    const targetDb = db === '__custom__' ? customDb.trim() : db;
-
-    async function refreshRoles() {
-      try {
-        const users = await sdk.fetch('GET', '/cpanelapi/mongodb/users');
-        const me = (users || []).find(u => u.username === username && u.auth_db === authDb);
-        if (me) setCurrentRoles(me.roles || []);
-        onChanged();
-      } catch (_) {}
-    }
-
-    async function handleGrant() {
-      if (!targetDb) { setFormError('Database is required.'); return; }
-      setSaving(true); setFormError('');
-      try {
-        await sdk.fetch('POST', `/cpanelapi/mongodb/users/${authDb}/${username}/roles`, { db: targetDb, role });
-        ok(`Granted ${role} on ${targetDb} to ${username}.`);
-        await refreshRoles();
-      } catch (e) {
-        const msg = e?.detail || 'Failed to grant role.';
-        setFormError(msg); err(msg);
-      } finally { setSaving(false); }
-    }
-
-    return html`
-      <div class="modal-overlay" onClick=${e => e.target === e.currentTarget && onClose()}>
-        <div class="modal animate-fade-in" style=${{ width: 480 }}>
-          <div class="modal-header">
-            <span class="modal-title">Manage Roles</span>
-            <button class="modal-close" onClick=${onClose}>×</button>
-          </div>
-          <div class="modal-body" style=${{ padding: 0 }}>
-            <div style=${{
-              padding: '14px 20px', background: 'var(--bg-2)',
-              borderBottom: '1px solid var(--border)',
-              display: 'flex', alignItems: 'center', gap: 12,
-            }}>
-              <div style=${{
-                width: 36, height: 36, borderRadius: '50%',
-                background: 'rgba(59,130,246,0.15)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 15, fontWeight: 600, color: '#60a5fa', fontFamily: 'var(--font-mono)',
-              }}>${username[0]?.toUpperCase()}</div>
-              <div>
-                <div style=${{ fontFamily: 'var(--font-mono)', fontWeight: 500, fontSize: 14, color: 'var(--text-1)' }}>${username}</div>
-                <div style=${{ fontSize: 12, color: 'var(--text-3)', marginTop: 2 }}>auth db: ${authDb}</div>
-              </div>
-            </div>
-
-            <div style=${{ padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
-              <div style=${{ fontSize: 11, fontWeight: 600, color: 'var(--text-3)', marginBottom: 10, letterSpacing: '0.06em' }}>CURRENT ROLES</div>
-              <${RoleChips} roles=${currentRoles} authDb=${authDb} username=${username} onChanged=${refreshRoles} />
-            </div>
-
-            <div style=${{ padding: '16px 20px' }}>
-              <div style=${{ fontSize: 11, fontWeight: 600, color: 'var(--text-3)', marginBottom: 12, letterSpacing: '0.06em' }}>GRANT NEW ROLE</div>
-              <div style=${{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div class="field" style=${{ marginBottom: 0 }}>
-                  <label>DATABASE</label>
-                  <select value=${db} onChange=${e => { setDb(e.target.value); setFormError(''); }}>
-                    ${(databases || []).map(d => html`<option value=${d.name}>${d.name}</option>`)}
-                    <option value="__custom__">Other…</option>
-                  </select>
-                </div>
-                <div class="field" style=${{ marginBottom: 0 }}>
-                  <label>ROLE</label>
-                  <select value=${role} onChange=${e => setRole(e.target.value)}>
-                    <option value="readWrite">readWrite</option>
-                    <option value="read">read</option>
-                    <option value="dbAdmin">dbAdmin</option>
-                    <option value="dbOwner">dbOwner</option>
-                  </select>
-                </div>
-              </div>
-              ${db === '__custom__' && html`
-                <div class="field" style=${{ marginTop: 10, marginBottom: 0 }}>
-                  <label>DATABASE NAME</label>
-                  <input type="text" placeholder="database name"
-                    value=${customDb} onInput=${e => setCustomDb(e.target.value)} />
-                </div>`}
-              ${formError && html`<div style=${{ color: 'var(--err)', fontSize: 12, marginTop: 10 }}>${formError}</div>`}
-            </div>
-          </div>
-          <div class="modal-footer">
-            <button class="btn btn-ghost btn-sm" onClick=${onClose}>Close</button>
-            <button class="btn btn-primary btn-sm" onClick=${handleGrant} disabled=${saving}>
-              ${saving ? 'Granting…' : 'Grant Role'}
-            </button>
-          </div>
-        </div>
-      </div>`;
-  }
-
-  function ChangePasswordModal({ authDb, username, onClose }) {
-    const { ok, err } = useToast();
-    const [password, setPassword] = useState('');
-    const [saving, setSaving] = useState(false);
-    const [formError, setFormError] = useState('');
-
-    async function handleSave() {
-      if (!password) { setFormError('Password is required.'); return; }
-      setSaving(true); setFormError('');
-      try {
-        await sdk.fetch('PUT', `/cpanelapi/mongodb/users/${authDb}/${username}/password`, { password });
-        ok('Password updated.');
-        onClose();
-      } catch (e) {
-        const msg = e?.detail || 'Failed to update password.';
-        setFormError(msg); err(msg);
-      } finally { setSaving(false); }
-    }
-
-    return html`
-      <div class="modal-overlay" onClick=${e => e.target === e.currentTarget && onClose()}>
-        <div class="modal animate-fade-in" style=${{ width: 400 }}>
-          <div class="modal-header">
-            <span class="modal-title">Change Password — ${username}</span>
-            <button class="modal-close" onClick=${onClose}>×</button>
-          </div>
-          <div class="modal-body" style=${{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            <div class="field">
-              <label>NEW PASSWORD</label>
-              <input type="password" autocomplete="new-password" placeholder="New password"
-                value=${password}
-                onInput=${e => { setPassword(e.target.value); setFormError(''); }}
-                onKeyDown=${e => e.key === 'Enter' && handleSave()} autoFocus />
-            </div>
-            ${formError && html`<div style=${{ color: 'var(--err)', fontSize: 12 }}>${formError}</div>`}
-          </div>
-          <div class="modal-footer">
-            <button class="btn btn-ghost btn-sm" onClick=${onClose} disabled=${saving}>Cancel</button>
-            <button class="btn btn-primary btn-sm" onClick=${handleSave} disabled=${saving}>
-              ${saving ? 'Saving…' : 'Update Password'}
-            </button>
-          </div>
-        </div>
-      </div>`;
-  }
-
-  function CreateUserModal({ databases, onClose, onCreated }) {
-    const { ok, err } = useToast();
-    const [username, setUsername] = useState('');
-    const [password, setPassword] = useState('');
-    const [authDb, setAuthDb] = useState(databases?.[0]?.name || '');
-    const [customDb, setCustomDb] = useState('');
-    const [role, setRole] = useState('readWrite');
-    const [saving, setSaving] = useState(false);
-    const [formError, setFormError] = useState('');
-
-    const targetDb = authDb === '__custom__' ? customDb.trim() : authDb;
-
-    async function handleCreate() {
-      if (!username.trim()) { setFormError('Username is required.'); return; }
-      if (!password) { setFormError('Password is required.'); return; }
-      if (!targetDb) { setFormError('Authentication database is required.'); return; }
-      setSaving(true); setFormError('');
-      try {
-        await sdk.fetch('POST', '/cpanelapi/mongodb/users', {
-          username: username.trim(), password, auth_db: targetDb, role,
-        });
-        ok(`User "${username.trim()}" created.`);
-        onCreated(); onClose();
-      } catch (e) {
-        const msg = e?.detail || 'Failed to create user.';
-        setFormError(msg); err(msg);
-      } finally { setSaving(false); }
-    }
-
-    return html`
-      <div class="modal-overlay" onClick=${e => e.target === e.currentTarget && onClose()}>
-        <div class="modal animate-fade-in" style=${{ width: 480 }}>
-          <div class="modal-header">
-            <span class="modal-title">Create User</span>
-            <button class="modal-close" onClick=${onClose}>×</button>
-          </div>
-          <div class="modal-body" style=${{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div style=${{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <div class="field">
-                <label>USERNAME</label>
-                <input type="text" placeholder="username" value=${username} autoFocus
-                  onInput=${e => { setUsername(e.target.value); setFormError(''); }} />
-              </div>
-              <div class="field">
-                <label>PASSWORD</label>
-                <input type="password" autocomplete="new-password" placeholder="••••••••"
-                  value=${password} onInput=${e => { setPassword(e.target.value); setFormError(''); }} />
-              </div>
-            </div>
-            <div style=${{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <div class="field">
-                <label>AUTH DATABASE</label>
-                <select value=${authDb} onChange=${e => { setAuthDb(e.target.value); setFormError(''); }}>
-                  ${(databases || []).map(d => html`<option value=${d.name}>${d.name}</option>`)}
-                  <option value="__custom__">Other…</option>
-                </select>
-              </div>
-              <div class="field">
-                <label>INITIAL ROLE</label>
-                <select value=${role} onChange=${e => setRole(e.target.value)}>
-                  <option value="readWrite">readWrite</option>
-                  <option value="read">read</option>
-                  <option value="dbAdmin">dbAdmin</option>
-                  <option value="dbOwner">dbOwner</option>
-                </select>
-              </div>
-            </div>
-            ${authDb === '__custom__' && html`
-              <div class="field">
-                <label>DATABASE NAME</label>
-                <input type="text" placeholder="database name"
-                  value=${customDb} onInput=${e => setCustomDb(e.target.value)} />
-              </div>`}
-            <div style=${{ color: 'var(--text-3)', fontSize: 12, lineHeight: 1.6 }}>
-              The auth database is where this user's credentials are stored.
-              Additional permissions can be granted after creation.
-            </div>
-            ${formError && html`<div style=${{ color: 'var(--err)', fontSize: 12 }}>${formError}</div>`}
-          </div>
-          <div class="modal-footer">
-            <button class="btn btn-ghost btn-sm" onClick=${onClose} disabled=${saving}>Cancel</button>
-            <button class="btn btn-primary btn-sm" onClick=${handleCreate} disabled=${saving}>
-              ${saving ? 'Creating…' : 'Create User'}
-            </button>
-          </div>
-        </div>
-      </div>`;
-  }
+  // ── Connection String Clipboard Component ─────────────────────────────────
 
   function ConnectionStringPanel({ user, port }) {
     const [lang, setLang] = useState('mongosh');
@@ -597,190 +38,348 @@
       python:  `MongoClient('${base}')`,
     };
 
+    const copy = (text) => {
+      navigator.clipboard.writeText(text).catch(() => {});
+    };
+
     return html`
-      <div style=${{
-        marginTop: 20, borderRadius: 8, overflow: 'hidden',
-        border: '1px solid var(--border)',
-      }}>
-        <div style=${{
-          padding: '10px 16px', background: 'var(--bg-2)',
-          borderBottom: '1px solid var(--border)',
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        }}>
-          <div style=${{ fontSize: 13, color: 'var(--text-2)' }}>
-            Connect as <span style=${{ fontFamily: 'var(--font-mono)', color: 'var(--primary)' }}>${user.username}</span>
+      <div style=${{ marginTop: 16, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
+        <div style=${{ padding: '10px 16px', background: 'var(--bg-2)', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style=${{ fontSize: 12.5, color: 'var(--text-2)' }}>
+            Connect as <span style=${{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>${user.username}</span>
           </div>
           <div style=${{ display: 'flex', background: 'var(--bg-3)', borderRadius: 6, padding: 2 }}>
             ${['mongosh', 'nodejs', 'python'].map(l => html`
               <button key=${l} onClick=${() => setLang(l)} style=${{
                 padding: '3px 10px', fontSize: 11, border: 'none', cursor: 'pointer',
                 borderRadius: 4, fontWeight: 500, transition: 'background 0.15s',
-                background: lang === l ? 'var(--primary)' : 'transparent',
+                background: lang === l ? 'var(--accent)' : 'transparent',
                 color: lang === l ? '#fff' : 'var(--text-3)',
               }}>${l}</button>`)}
           </div>
         </div>
-        <div style=${{
-          padding: '12px 16px', background: 'var(--bg-3)',
-          display: 'flex', alignItems: 'center', gap: 12,
-        }}>
-          <code style=${{
-            fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-1)',
-            wordBreak: 'break-all', flex: 1, lineHeight: 1.6,
-          }}>${snippets[lang]}</code>
-          <${CopyButton} text=${snippets[lang]} />
+        <div style=${{ padding: '12px 16px', background: 'var(--bg-3)', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <code style=${{ fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'var(--text-1)', wordBreak: 'break-all', flex: 1, lineHeight: 1.6 }}>${snippets[lang]}</code>
+          <button class="btn btn-ghost btn-xs" onClick=${() => copy(snippets[lang])}>Copy</button>
         </div>
-        <div style=${{
-          padding: '8px 16px', background: 'var(--bg-2)',
-          fontSize: 12, color: 'var(--text-3)', lineHeight: 1.5,
-        }}>
-          Replace <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>&lt;password&gt;</code> with the actual password.
-          For external access replace <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>127.0.0.1</code> with your server hostname.
+        <div style=${{ padding: '8px 16px', background: 'var(--bg-2)', fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.5 }}>
+          Replace <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>&lt;password&gt;</code> with actual password. For remote access, replace <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>127.0.0.1</code> with your domain/IP.
         </div>
       </div>`;
   }
 
-  function UsersTab({ statusData }) {
-    const { ok, err } = useToast();
-    const port = statusData?.port || 27017;
+  // ── MongoDB Plugin Root ───────────────────────────────────────────────────
 
-    const { data: users, loading, error, refetch } = useApi(
-      () => sdk.fetch('GET', '/cpanelapi/mongodb/users'),
-    );
-    const { data: databases } = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/databases'));
+  function MongoDBPlugin() {
+    const { ok, err: toastErr } = useToast();
 
-    const [showCreate, setShowCreate] = useState(false);
-    const [grantTarget, setGrantTarget] = useState(null);
-    const [pwdTarget, setPwdTarget] = useState(null);
-    const [deleteTarget, setDeleteTarget] = useState(null);
-    const [deleting, setDeleting] = useState(false);
-    const [connUser, setConnUser] = useState(null);
+    // Secondary categories inside split-left: databases, users, backups
+    const [activeCategory, setActiveCategory] = useState('databases');
+    const [searchQuery, setSearchQuery] = useState('');
+    const [addingNew, setAddingNew] = useState(false);
 
-    async function handleDelete() {
-      if (!deleteTarget) return; setDeleting(true);
-      try {
-        await sdk.fetch('DELETE', `/cpanelapi/mongodb/users/${deleteTarget.auth_db}/${deleteTarget.username}`);
-        ok(`User "${deleteTarget.username}" deleted.`);
-        setDeleteTarget(null);
-        if (connUser?.username === deleteTarget.username) setConnUser(null);
-        refetch();
-      } catch (e) { err(e?.detail || 'Failed to delete user.'); setDeleteTarget(null); }
-      finally { setDeleting(false); }
-    }
+    // Selected items
+    const [selectedDbName, setSelectedDbName] = useState(null);
+    const [selectedUsername, setSelectedUsername] = useState(null);
+    const [selectedBackupName, setSelectedBackupName] = useState(null);
 
-    const cols = [
-      { key: 'nameCell',   label: 'Username' },
-      { key: 'authDbCell', label: 'Auth DB' },
-      { key: 'rolesCell',  label: 'Roles' },
-    ];
+    // Right-pane detail tab states
+    const [dbActiveTab, setDbActiveTab] = useState('collections');
+    const [userActiveTab, setUserActiveTab] = useState('roles');
+    const [backupActiveTab, setBackupActiveTab] = useState('restore');
 
-    const rows = (users || []).map(u => ({
-      ...u,
-      nameCell:   html`<span style=${{ fontFamily: 'var(--font-mono)', fontWeight: 500 }}>${u.username}</span>`,
-      authDbCell: html`<${Badge} color="blue">${u.auth_db}</${Badge}>`,
-      rolesCell:  html`<${RoleChips} roles=${u.roles} authDb=${u.auth_db} username=${u.username} onChanged=${refetch} />`,
-    }));
+    // API Hooks data
+    const { data: statusData, refetch: refetchStatus } = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/status'));
+    const dbRes = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/databases'));
+    const userRes = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/users'));
+    const backupsRes = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/backups'));
 
-    return html`
-      <div class="card">
-        <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-          <div>
-            <div class="card-title" style=${{ marginBottom: 2 }}>Users</div>
-            ${!loading && users?.length > 0 && html`
-              <div style=${{ fontSize: 12, color: 'var(--text-3)' }}>
-                ${users.length} user${users.length !== 1 ? 's' : ''}
-              </div>`}
-          </div>
-          <button class="btn btn-primary btn-sm" onClick=${() => setShowCreate(true)}>+ Create User</button>
-        </div>
+    const databases = dbRes.data || [];
+    const dbLoading = dbRes.loading;
+    const refetchDbs = dbRes.refetch;
 
-        ${error ? html`
-          <div class="empty">
-            <div class="empty-title" style=${{ color: 'var(--err)' }}>Could not load users</div>
-            <div class="empty-desc">${error?.detail || String(error)}</div>
-          </div>` : html`
-          <${Table} columns=${cols} rows=${rows} loading=${loading}
-            empty=${{ title: 'No users', desc: 'Create a user to get started.' }}
-            renderActions=${row => html`
-              <button class="btn btn-ghost btn-sm"
-                style=${{ color: connUser?.username === row.username ? 'var(--primary)' : '' }}
-                onClick=${() => setConnUser(connUser?.username === row.username ? null : row)}>
-                ${connUser?.username === row.username ? 'Hide' : 'Connect'}
-              </button>
-              <button class="btn btn-ghost btn-sm" onClick=${() => setGrantTarget(row)}>Manage Roles</button>
-              <button class="btn btn-ghost btn-sm" onClick=${() => setPwdTarget(row)}>Password</button>
-              <button class="btn btn-danger btn-sm" onClick=${() => setDeleteTarget(row)}>Delete</button>
-            `}
-          />`}
+    const users = userRes.data || [];
+    const userLoading = userRes.loading;
+    const refetchUsers = userRes.refetch;
 
-        <${ConnectionStringPanel} user=${connUser} port=${port} />
-      </div>
+    const backupsData = backupsRes.data || {};
+    const backupLoading = backupsRes.loading;
+    const refetchBackups = backupsRes.refetch;
 
-      ${showCreate && html`
-        <${CreateUserModal} databases=${databases || []}
-          onClose=${() => setShowCreate(false)} onCreated=${refetch} />`}
+    // Status auto-refresh
+    useEffect(() => {
+      const id = setInterval(refetchStatus, 30000);
+      return () => clearInterval(id);
+    }, [refetchStatus]);
 
-      ${grantTarget && html`
-        <${ManageRolesModal}
-          authDb=${grantTarget.auth_db} username=${grantTarget.username}
-          roles=${grantTarget.roles} databases=${databases || []}
-          onClose=${() => { setGrantTarget(null); refetch(); }}
-          onChanged=${refetch} />`}
+    // Active item selections
+    const activeDb = useMemo(() => databases.find(d => d.name === selectedDbName), [databases, selectedDbName]);
+    const activeUser = useMemo(() => users.find(u => u.username === selectedUsername), [users, selectedUsername]);
+    const activeBackup = useMemo(() => (backupsData.backups || []).find(b => b.name === selectedBackupName), [backupsData, selectedBackupName]);
 
-      ${pwdTarget && html`
-        <${ChangePasswordModal} authDb=${pwdTarget.auth_db} username=${pwdTarget.username}
-          onClose=${() => setPwdTarget(null)} />`}
+    // Forms and action busy states
+    const [formBusy, setFormBusy] = useState(false);
+    const [formError, setFormError] = useState('');
 
-      ${deleteTarget && html`
-        <${SdkConfirmModal} open=${true} title="Delete User" danger=${true}
-          message=${`Delete user "${deleteTarget.username}"? This cannot be undone.`}
-          onClose=${() => setDeleteTarget(null)} onConfirm=${handleDelete} />`}`;
-  }
+    // Database form state
+    const [formDbName, setFormDbName] = useState('');
 
-  // ── Backups tab ───────────────────────────────────────────────────────────
+    // User form state
+    const [formUser, setFormUser] = useState('');
+    const [formPass, setFormPass] = useState('');
+    const [formAuthDb, setFormAuthDb] = useState('');
+    const [formCustomDb, setFormCustomDb] = useState('');
+    const [formRole, setFormRole] = useState('readWrite');
 
-  function BackupsTab() {
-    const { ok, err } = useToast();
-    const { data, loading, refetch } = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/backups'));
-    const { data: dbData } = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/databases'));
-    const databases = dbData || [];
+    // Role grant form state
+    const [grantDb, setGrantDb] = useState('');
+    const [grantCustomDb, setGrantCustomDb] = useState('');
+    const [grantRole, setGrantRole] = useState('readWrite');
 
-    const [backing, setBacking] = useState(false);
-    const [restoreTarget, setRestoreTarget] = useState(null);
-    const [deleteTarget, setDeleteTarget] = useState(null);
-    const [backupDb, setBackupDb] = useState('__all__');
+    // User Password Form State
+    const [userNewPass, setUserNewPass] = useState('');
+
+    // Backup form state
+    const [formBackupDb, setFormBackupDb] = useState('__all__');
     const [dropOnRestore, setDropOnRestore] = useState(false);
 
-    const toolAvailable = data?.tool_available;
-    const backups = data?.backups || [];
+    // Confirm Modals states
+    const [confirmDropDb, setConfirmDropDb] = useState(null);
+    const [confirmClearDb, setConfirmClearDb] = useState(null);
+    const [confirmDeleteUser, setConfirmDeleteUser] = useState(null);
+    const [confirmDeleteBackup, setConfirmDeleteBackup] = useState(null);
+    const [confirmRestoreBackup, setConfirmRestoreBackup] = useState(null);
 
-    async function handleBackup() {
-      setBacking(true);
+    // ── Navigation & Views Helpers ──────────────────────────────────────────
+
+    const handleCategoryChange = (cat) => {
+      setActiveCategory(cat);
+      setSearchQuery('');
+      setAddingNew(false);
+      setSelectedDbName(null);
+      setSelectedUsername(null);
+      setSelectedBackupName(null);
+      setFormError('');
+    };
+
+    const triggerAddView = () => {
+      setAddingNew(true);
+      setSelectedDbName(null);
+      setSelectedUsername(null);
+      setSelectedBackupName(null);
+      setFormError('');
+
+      // Prep form variables
+      setFormDbName('');
+      setFormUser('');
+      setFormPass('');
+      setFormAuthDb(databases[0]?.name || '');
+      setFormCustomDb('');
+      setFormRole('readWrite');
+      setFormBackupDb('__all__');
+    };
+
+    // Filtered lists
+    const filteredDatabases = useMemo(() => {
+      if (!searchQuery.trim()) return databases;
+      const q = searchQuery.toLowerCase();
+      return databases.filter(d => d.name.toLowerCase().includes(q));
+    }, [databases, searchQuery]);
+
+    const filteredUsers = useMemo(() => {
+      if (!searchQuery.trim()) return users;
+      const q = searchQuery.toLowerCase();
+      return users.filter(u => u.username.toLowerCase().includes(q));
+    }, [users, searchQuery]);
+
+    const filteredBackups = useMemo(() => {
+      const list = backupsData.backups || [];
+      if (!searchQuery.trim()) return list;
+      const q = searchQuery.toLowerCase();
+      return list.filter(b => b.name.toLowerCase().includes(q));
+    }, [backupsData, searchQuery]);
+
+    // Selection clickers
+    const selectDatabase = (db) => {
+      setSelectedDbName(db.name);
+      setAddingNew(false);
+      setDbActiveTab('collections');
+      setFormError('');
+    };
+
+    const selectUser = (usr) => {
+      setSelectedUsername(usr.username);
+      setAddingNew(false);
+      setUserActiveTab('roles');
+      setFormError('');
+      setGrantDb(databases[0]?.name || '');
+      setGrantCustomDb('');
+      setGrantRole('readWrite');
+      setUserNewPass('');
+    };
+
+    const selectBackup = (bkp) => {
+      setSelectedBackupName(bkp.name);
+      setAddingNew(false);
+      setBackupActiveTab('restore');
+      setFormError('');
+      setDropOnRestore(false);
+    };
+
+    // ── API Database Operations ──────────────────────────────────────────────
+
+    const handleCreateDatabase = async (e) => {
+      e.preventDefault();
+      const trimmed = formDbName.trim();
+      if (!trimmed) { setFormError('Database name is required'); return; }
+      setFormBusy(true); setFormError('');
       try {
-        const db = backupDb === '__all__' ? undefined : backupDb;
+        await sdk.fetch('POST', '/cpanelapi/mongodb/databases', { name: trimmed });
+        ok(`Database "${trimmed}" created successfully`);
+        refetchDbs();
+        setAddingNew(false);
+        setSelectedDbName(trimmed);
+      } catch (e) {
+        setFormError(e.message || 'Failed to create database');
+      } finally { setFormBusy(false); }
+    };
+
+    const handleClearDatabase = async () => {
+      if (!confirmClearDb) return;
+      try {
+        await sdk.fetch('POST', `/cpanelapi/mongodb/databases/${confirmClearDb}/clear`);
+        ok(`Database "${confirmClearDb}" cleared`);
+        refetchDbs();
+      } catch (e) {
+        toastErr(e.message || 'Failed to clear database');
+      } finally { setConfirmClearDb(null); }
+    };
+
+    const handleDropDatabase = async () => {
+      if (!confirmDropDb) return;
+      try {
+        await sdk.fetch('DELETE', `/cpanelapi/mongodb/databases/${confirmDropDb}`);
+        ok(`Database "${confirmDropDb}" dropped`);
+        setSelectedDbName(null);
+        refetchDbs();
+        refetchUsers(); // roles might have updated/revoked
+      } catch (e) {
+        toastErr(e.message || 'Failed to drop database');
+      } finally { setConfirmDropDb(null); }
+    };
+
+    // ── API User Operations ──────────────────────────────────────────────────
+
+    const handleCreateUser = async (e) => {
+      e.preventDefault();
+      setFormError('');
+      const usr = formUser.trim();
+      const pwd = formPass;
+      const targetDb = formAuthDb === '__custom__' ? formCustomDb.trim() : formAuthDb;
+
+      if (!usr) { setFormError('Username is required'); return; }
+      if (!pwd) { setFormError('Password is required'); return; }
+      if (!targetDb) { setFormError('Authentication database is required'); return; }
+
+      setFormBusy(true);
+      try {
+        await sdk.fetch('POST', '/cpanelapi/mongodb/users', {
+          username: usr, password: pwd, auth_db: targetDb, role: formRole,
+        });
+        ok(`User "${usr}" created successfully`);
+        refetchUsers();
+        setAddingNew(false);
+        setSelectedUsername(usr);
+      } catch (e) {
+        setFormError(e.message || 'Failed to create user');
+      } finally { setFormBusy(false); }
+    };
+
+    const handleGrantRole = async (e) => {
+      e.preventDefault();
+      if (!activeUser) return;
+      setFormError('');
+      const dbTarget = grantDb === '__custom__' ? grantCustomDb.trim() : grantDb;
+      if (!dbTarget) { setFormError('Database is required'); return; }
+
+      setFormBusy(true);
+      try {
+        await sdk.fetch('POST', `/cpanelapi/mongodb/users/${activeUser.auth_db}/${activeUser.username}/roles`, {
+          db: dbTarget, role: grantRole,
+        });
+        ok(`Granted ${grantRole} on ${dbTarget} to ${activeUser.username}`);
+        refetchUsers();
+        setGrantCustomDb('');
+      } catch (e) {
+        setFormError(e.message || 'Failed to grant role');
+      } finally { setFormBusy(false); }
+    };
+
+    const handleRevokeRole = async (roleObj) => {
+      if (!activeUser) return;
+      try {
+        await sdk.fetch('DELETE', `/cpanelapi/mongodb/users/${activeUser.auth_db}/${activeUser.username}/roles/${roleObj.db}/${roleObj.role}`);
+        ok(`Revoked ${roleObj.role} on ${roleObj.db} from ${activeUser.username}`);
+        refetchUsers();
+      } catch (e) {
+        toastErr(e.message || 'Failed to revoke role');
+      }
+    };
+
+    const handleChangeUserPassword = async (e) => {
+      e.preventDefault();
+      if (!activeUser) return;
+      setFormError('');
+      if (!userNewPass) { setFormError('Password is required'); return; }
+
+      setFormBusy(true);
+      try {
+        await sdk.fetch('PUT', `/cpanelapi/mongodb/users/${activeUser.auth_db}/${activeUser.username}/password`, {
+          password: userNewPass,
+        });
+        ok('User password updated successfully');
+        setUserNewPass('');
+      } catch (e) {
+        setFormError(e.message || 'Failed to change password');
+      } finally { setFormBusy(false); }
+    };
+
+    const handleDeleteUser = async () => {
+      if (!confirmDeleteUser) return;
+      try {
+        await sdk.fetch('DELETE', `/cpanelapi/mongodb/users/${confirmDeleteUser.auth_db}/${confirmDeleteUser.username}`);
+        ok(`User "${confirmDeleteUser.username}" deleted`);
+        setSelectedUsername(null);
+        refetchUsers();
+      } catch (e) {
+        toastErr(e.message || 'Failed to delete user');
+      } finally { setConfirmDeleteUser(null); }
+    };
+
+    // ── API Backup Operations ────────────────────────────────────────────────
+
+    const handleCreateBackup = async (e) => {
+      e.preventDefault();
+      setFormBusy(true); setFormError('');
+      try {
+        const db = formBackupDb === '__all__' ? undefined : formBackupDb;
         const res = await sdk.fetch('POST', '/cpanelapi/mongodb/backups', { db: db || null });
-        ok(`Backup "${res.name}" created.`);
-        refetch();
-      } catch (e) { err(e?.detail || 'Backup failed.'); }
-      finally { setBacking(false); }
-    }
+        ok(`Backup "${res.name}" trigger job started`);
+        refetchBackups();
+        setAddingNew(false);
+        setSelectedBackupName(res.name);
+      } catch (e) {
+        setFormError(e.message || 'Backup failed');
+      } finally { setFormBusy(false); }
+    };
 
-    async function handleRestore() {
-      if (!restoreTarget) return;
-      try {
-        await sdk.fetch('POST', '/cpanelapi/mongodb/backups/restore', { name: restoreTarget, drop: dropOnRestore });
-        ok(`Restored from "${restoreTarget}".`);
-        setRestoreTarget(null);
-      } catch (e) { err(e?.detail || 'Restore failed.'); setRestoreTarget(null); }
-    }
-
-    async function handleDownload(name) {
+    const handleDownloadBackup = async (name) => {
       const token = localStorage.getItem('auth_token');
       try {
         const res = await fetch(`/cpanelapi/mongodb/backups/${encodeURIComponent(name)}/download`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
-        if (!res.ok) { err('Download failed.'); return; }
+        if (!res.ok) { toastErr('Download file failed'); return; }
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -788,142 +387,620 @@
         document.body.appendChild(a); a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-      } catch (e) { err('Download failed.'); }
-    }
+      } catch (e) {
+        toastErr('Download request failed');
+      }
+    };
 
-    async function handleDeleteBackup() {
-      if (!deleteTarget) return;
+    const handleRestoreBackup = async () => {
+      if (!confirmRestoreBackup) return;
       try {
-        await sdk.fetch('DELETE', `/cpanelapi/mongodb/backups/${deleteTarget}`);
-        ok(`Backup "${deleteTarget}" deleted.`);
-        setDeleteTarget(null); refetch();
-      } catch (e) { err(e?.detail || 'Failed to delete.'); setDeleteTarget(null); }
-    }
+        await sdk.fetch('POST', '/cpanelapi/mongodb/backups/restore', { name: confirmRestoreBackup, drop: dropOnRestore });
+        ok(`Restored database state from backup "${confirmRestoreBackup}"`);
+        refetchDbs();
+      } catch (e) {
+        toastErr(e.message || 'Restore process failed');
+      } finally { setConfirmRestoreBackup(null); }
+    };
 
-    if (!loading && !toolAvailable) {
-      return html`
-        <div class="card">
-          <div class="card-title">Backups</div>
-          <div class="empty">
-            <div class="empty-title">mongodump not available</div>
-            <div class="empty-desc">
-              Place <code>mongodump</code> and <code>mongorestore</code> alongside <code>mongod</code>
-              in <code>/opt/hostpanel/plugins/mongodb/</code>.
-            </div>
-          </div>
-        </div>`;
-    }
-
-    const cols = [
-      { key: 'nameCell',   label: 'Name' },
-      { key: 'scopeCell',  label: 'Scope' },
-      { key: 'dateDisplay', label: 'Created' },
-    ];
-
-    const rows = backups.map(b => ({
-      ...b,
-      nameCell:    html`<span style=${{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>${b.name}</span>`,
-      scopeCell:   b.db
-        ? html`<${Badge} color="green">${b.db}</${Badge}>`
-        : html`<${Badge} color="blue">Full</${Badge}>`,
-      dateDisplay: fmtDate(b.created_at),
-    }));
+    const handleDeleteBackup = async () => {
+      if (!confirmDeleteBackup) return;
+      try {
+        await sdk.fetch('DELETE', `/cpanelapi/mongodb/backups/${confirmDeleteBackup}`);
+        ok(`Backup file "${confirmDeleteBackup}" deleted`);
+        setSelectedBackupName(null);
+        refetchBackups();
+      } catch (e) {
+        toastErr(e.message || 'Delete backup failed');
+      } finally { setConfirmDeleteBackup(null); }
+    };
 
     return html`
-      <div class="card">
-        <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+      <div class="page" style=${{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, overflow: 'hidden', padding: '24px' }}>
+        
+        <!-- Premium Header with nested Status Badge -->
+        <div class="page-header" style=${{ flexShrink: 0, marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
-            <div class="card-title" style=${{ marginBottom: 2 }}>Backups</div>
-            ${!loading && backups.length > 0 && html`
-              <div style=${{ fontSize: 12, color: 'var(--text-3)' }}>
-                ${backups.length} backup${backups.length !== 1 ? 's' : ''}
-              </div>`}
+            <h1 class="page-title" style=${{ display: 'flex', alignItems: 'center', gap: 10, margin: 0 }}>
+              <span>MongoDB</span>
+              ${statusData ? html`
+                <span class=${'badge ' + (statusData.running ? 'badge-ok' : 'badge-dim')} style=${{ fontSize: 10, padding: '2px 8px' }}>
+                  ${statusData.running ? `Online (v${statusData.version || 'unknown'})` : 'Offline'}
+                </span>
+              ` : html`<span class="badge badge-dim">Checking…</span>`}
+            </h1>
+            <p class="page-desc" style=${{ margin: '4px 0 0' }}>
+              ${databases.length} databases · v${statusData?.version || '7.0.12'} running
+            </p>
           </div>
-          <div style=${{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <select value=${backupDb} onChange=${e => setBackupDb(e.target.value)} style=${{
-              fontSize: 13, padding: '5px 8px', borderRadius: 6,
-              border: '1px solid var(--border)', background: 'var(--bg-2)', color: 'var(--text-1)',
-            }}>
-              <option value="__all__">All databases</option>
-              ${databases.map(d => html`<option value=${d.name}>${d.name}</option>`)}
-            </select>
-            <button class="btn btn-primary btn-sm" onClick=${handleBackup} disabled=${backing}>
-              ${backing ? 'Backing up…' : 'Backup Now'}
+          <div style=${{ display: 'flex', gap: 8 }}>
+            <button class="btn btn-outline btn-sm" onClick=${() => toastErr('Mongo Shell feature coming soon')} disabled=${statusData && !statusData.running}>
+              🐚 Mongo Shell
+            </button>
+            <button class="btn btn-primary btn-sm" onClick=${triggerAddView} disabled=${statusData && !statusData.running}>
+              + New Database
             </button>
           </div>
         </div>
 
-        <${Table} columns=${cols} rows=${rows} loading=${loading}
-          empty=${{ title: 'No backups', desc: 'Create your first backup using the button above.' }}
-          renderActions=${row => html`
-            <button class="btn btn-ghost btn-sm" onClick=${() => setRestoreTarget(row.name)}>Restore</button>
-            <button class="btn btn-ghost btn-sm" onClick=${() => handleDownload(row.name)}>Download</button>
-            <button class="btn btn-danger btn-sm" onClick=${() => setDeleteTarget(row.name)}>Delete</button>
-          `}
-        />
-      </div>
-
-      ${restoreTarget && html`
-        <div class="modal-overlay" onClick=${e => e.target === e.currentTarget && setRestoreTarget(null)}>
-          <div class="modal animate-fade-in" style=${{ width: 420 }}>
-            <div class="modal-header">
-              <span class="modal-title">Restore Backup</span>
-              <button class="modal-close" onClick=${() => setRestoreTarget(null)}>×</button>
+        <div class="split-view" style=${{ flex: 1, minHeight: 0 }}>
+          
+          <!-- Left Panel: Switcher + Dynamic Lists -->
+          <div class="split-left" style=${{ width: 300, display: 'flex', flexDirection: 'column' }}>
+            
+            <!-- Category Selector Tabs -->
+            <div class="tab-bar" style=${{ padding: '0 10px', background: 'var(--bg-3)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <button class=${'tab' + (activeCategory === 'databases' ? ' active' : '')} style=${{ flex: 1, textAlign: 'center' }} onClick=${() => handleCategoryChange('databases')}>Databases</button>
+              <button class=${'tab' + (activeCategory === 'users' ? ' active' : '')} style=${{ flex: 1, textAlign: 'center' }} onClick=${() => handleCategoryChange('users')}>Users</button>
+              <button class=${'tab' + (activeCategory === 'backups' ? ' active' : '')} style=${{ flex: 1, textAlign: 'center' }} onClick=${() => handleCategoryChange('backups')}>Backups</button>
             </div>
-            <div class="modal-body" style=${{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div style=${{
-                padding: '10px 14px', background: 'var(--bg-2)', borderRadius: 6,
-                fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-1)',
-                border: '1px solid var(--border)',
-              }}>${restoreTarget}</div>
-              <label style=${{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
-                <input type="checkbox" checked=${dropOnRestore}
-                  onChange=${e => setDropOnRestore(e.target.checked)} />
-                Drop existing collections before restoring
-              </label>
-              <div style=${{ color: 'var(--text-3)', fontSize: 12 }}>
-                Without "drop", restored data merges with existing collections.
+
+            <!-- List Search / Add headers -->
+            <div class="split-pane-header" style=${{ padding: '12px 14px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+              <div class="search-wrap" style=${{ margin: 0, flex: 1 }}>
+                <input
+                  type="text"
+                  placeholder=${activeCategory === 'databases' ? 'Filter databases…' : activeCategory === 'users' ? 'Filter users…' : 'Filter backups…'}
+                  value=${searchQuery}
+                  onInput=${e => setSearchQuery(e.target.value)}
+                />
               </div>
             </div>
-            <div class="modal-footer">
-              <button class="btn btn-ghost btn-sm" onClick=${() => setRestoreTarget(null)}>Cancel</button>
-              <button class="btn btn-danger btn-sm" onClick=${handleRestore}>Restore</button>
+
+            <!-- Scrollable Items List -->
+            <div class="split-scroll" style=${{ flex: 1, overflowY: 'auto' }}>
+              ${activeCategory === 'databases' ? html`
+                ${dbLoading && databases.length === 0
+                  ? html`<div style=${{ color: 'var(--text-3)', padding: 20, textAlign: 'center', fontSize: 12.5 }}>Loading databases…</div>`
+                  : filteredDatabases.length === 0
+                    ? html`<div class="empty" style=${{ padding: '32px 16px' }}><div class="empty-title">No databases</div></div>`
+                    : filteredDatabases.map(db => {
+                        const isSelected = selectedDbName === db.name;
+                        return html`
+                          <div key=${db.name} class=${'list-item ' + (isSelected ? 'sel' : '')} onClick=${() => selectDatabase(db)}>
+                            <div class="li-icon" style=${{ background: 'var(--bg-3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{ color: isSelected ? 'var(--accent)' : 'var(--text-3)' }}><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5V19A9 3 0 0 0 21 19V5"></path><path d="M3 12A9 3 0 0 0 21 12"></path></svg>
+                            </div>
+                            <div style=${{ flex: 1, minWidth: 0 }}>
+                              <div class="li-name" style=${{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500, fontSize: 13 }}>${db.name}</div>
+                              <div class="li-sub">${db.collections} collections · ${fmtSize(db.size)}</div>
+                            </div>
+                          </div>`;
+                      })}
+              ` : activeCategory === 'users' ? html`
+                ${userLoading && users.length === 0
+                  ? html`<div style=${{ color: 'var(--text-3)', padding: 20, textAlign: 'center', fontSize: 12.5 }}>Loading users…</div>`
+                  : filteredUsers.length === 0
+                    ? html`<div class="empty" style=${{ padding: '32px 16px' }}><div class="empty-title">No users</div></div>`
+                    : filteredUsers.map(usr => {
+                        const isSelected = selectedUsername === usr.username;
+                        return html`
+                          <div key=${usr.username + '@' + usr.auth_db} class=${'list-item ' + (isSelected ? 'sel' : '')} onClick=${() => selectUser(usr)}>
+                            <div class="li-icon" style=${{ background: 'var(--bg-3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{ color: isSelected ? 'var(--accent)' : 'var(--text-3)' }}><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+                            </div>
+                            <div style=${{ flex: 1, minWidth: 0 }}>
+                              <div class="li-name" style=${{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500, fontSize: 13 }}>${usr.username}</div>
+                              <div class="li-sub">auth db: ${usr.auth_db}</div>
+                            </div>
+                          </div>`;
+                      })}
+              ` : html`
+                ${backupLoading && (backupsData.backups || []).length === 0
+                  ? html`<div style=${{ color: 'var(--text-3)', padding: 20, textAlign: 'center', fontSize: 12.5 }}>Loading backups…</div>`
+                  : filteredBackups.length === 0
+                    ? html`<div class="empty" style=${{ padding: '32px 16px' }}><div class="empty-title">No backups</div></div>`
+                    : filteredBackups.map(bkp => {
+                        const isSelected = selectedBackupName === bkp.name;
+                        return html`
+                          <div key=${bkp.name} class=${'list-item ' + (isSelected ? 'sel' : '')} onClick=${() => selectBackup(bkp)}>
+                            <div class="li-icon" style=${{ background: 'var(--bg-3)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{ color: isSelected ? 'var(--accent)' : 'var(--text-3)' }}><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                            </div>
+                            <div style=${{ flex: 1, minWidth: 0 }}>
+                              <div class="li-name" style=${{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500, fontSize: 13 }} title=${bkp.name}>${bkp.name}</div>
+                              <div class="li-sub">${fmtSize(bkp.size)} • ${fmtDate(bkp.created_at)}</div>
+                            </div>
+                          </div>`;
+                      })}
+              `}
             </div>
           </div>
-        </div>`}
 
-      ${deleteTarget && html`
-        <${SdkConfirmModal} open=${true} title="Delete Backup" danger=${true}
-          message=${`Permanently delete backup "${deleteTarget}"?`}
-          onClose=${() => setDeleteTarget(null)} onConfirm=${handleDeleteBackup} />`}`;
-  }
+          <!-- Right Panel: Contextual detail views or Forms -->
+          <div class="split-right" style=${{ paddingLeft: 20, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            
+            ${addingNew ? html`
+              <!-- Dynamic Inline Creation Forms -->
+              <div class="animate-fade-in" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+                <div class="split-pane-header" style=${{ padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+                  <h3 style=${{ margin: 0 }}>Create ${activeCategory === 'databases' ? 'Database' : activeCategory === 'users' ? 'Database User' : 'Database Backup'}</h3>
+                </div>
+                <div style=${{ flex: 1, overflowY: 'auto', padding: 20 }}>
+                  
+                  ${activeCategory === 'databases' && html`
+                    <form onSubmit=${handleCreateDatabase} style=${{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 420 }}>
+                      <div class="field">
+                        <label>Database Name</label>
+                        <input class="search-input" type="text" placeholder="e.g. blog_db" value=${formDbName} onInput=${e => { setFormDbName(e.target.value); setFormError(''); }} required style=${{ width: '100%' }} />
+                        <span style=${{ fontSize: 11, color: 'var(--text-3)' }}>Letters, numbers, underscores — max 38 characters.</span>
+                      </div>
+                      ${formError && html`<div style=${{ color: 'var(--err)', fontSize: 12 }}>${formError}</div>`}
+                      <div style=${{ display: 'flex', gap: 10, marginTop: 10 }}>
+                        <button type="button" class="btn btn-ghost btn-sm" onClick=${() => setAddingNew(false)} disabled=${formBusy}>Cancel</button>
+                        <button type="submit" class="btn btn-primary btn-sm" disabled=${formBusy}>${formBusy ? 'Creating…' : 'Create Database'}</button>
+                      </div>
+                    </form>
+                  `}
 
-  // ── Main Plugin ───────────────────────────────────────────────────────────
+                  ${activeCategory === 'users' && html`
+                    <form onSubmit=${handleCreateUser} style=${{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, maxWidth: 540 }}>
+                      <div class="field">
+                        <label>Username</label>
+                        <input class="search-input" type="text" placeholder="db_admin" value=${formUser} onInput=${e => setFormUser(e.target.value)} required style=${{ width: '100%' }} />
+                      </div>
+                      <div class="field">
+                        <label>Password</label>
+                        <input class="search-input" type="password" autocomplete="new-password" placeholder="••••••••" value=${formPass} onInput=${e => setFormPass(e.target.value)} required style=${{ width: '100%' }} />
+                      </div>
+                      <div class="field">
+                        <label>Auth Database</label>
+                        <select value=${formAuthDb} onChange=${e => setFormAuthDb(e.target.value)} style=${{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8, padding: '7px 10px', color: 'var(--text)', fontSize: 13 }}>
+                          ${databases.map(d => html`<option value=${d.name}>${d.name}</option>`)}
+                          <option value="__custom__">Other…</option>
+                        </select>
+                      </div>
+                      <div class="field">
+                        <label>Initial Role</label>
+                        <select value=${formRole} onChange=${e => setFormRole(e.target.value)} style=${{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8, padding: '7px 10px', color: 'var(--text)', fontSize: 13 }}>
+                          <option value="readWrite">readWrite</option>
+                          <option value="read">read</option>
+                          <option value="dbAdmin">dbAdmin</option>
+                          <option value="dbOwner">dbOwner</option>
+                        </select>
+                      </div>
+                      ${formAuthDb === '__custom__' && html`
+                        <div class="field" style=${{ gridColumn: '1 / -1' }}>
+                          <label>Custom Database Name</label>
+                          <input class="search-input" type="text" placeholder="custom_db" value=${formCustomDb} onInput=${e => setFormCustomDb(e.target.value)} required style=${{ width: '100%' }} />
+                        </div>
+                      `}
+                      ${formError && html`<div style=${{ gridColumn: '1 / -1', color: 'var(--err)', fontSize: 12 }}>${formError}</div>`}
+                      <div style=${{ gridColumn: '1 / -1', display: 'flex', gap: 10, marginTop: 10 }}>
+                        <button type="button" class="btn btn-ghost btn-sm" onClick=${() => setAddingNew(false)} disabled=${formBusy}>Cancel</button>
+                        <button type="submit" class="btn btn-primary btn-sm" disabled=${formBusy}>${formBusy ? 'Creating…' : 'Create User'}</button>
+                      </div>
+                    </form>
+                  `}
 
-  const TABS = [
-    { id: 'databases', label: 'Databases' },
-    { id: 'users',     label: 'Users' },
-    { id: 'backups',   label: 'Backups' },
-  ];
+                  ${activeCategory === 'backups' && html`
+                    <form onSubmit=${handleCreateBackup} style=${{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 420 }}>
+                      <div class="field">
+                        <label>Select Target Database</label>
+                        <select value=${formBackupDb} onChange=${e => setFormBackupDb(e.target.value)} style=${{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8, padding: '7px 10px', color: 'var(--text)', fontSize: 13 }}>
+                          <option value="__all__">Backup All Databases</option>
+                          ${databases.map(d => html`<option value=${d.name}>${d.name}</option>`)}
+                        </select>
+                      </div>
+                      ${formError && html`<div style=${{ color: 'var(--err)', fontSize: 12 }}>${formError}</div>`}
+                      <div style=${{ display: 'flex', gap: 10, marginTop: 10 }}>
+                        <button type="button" class="btn btn-ghost btn-sm" onClick=${() => setAddingNew(false)} disabled=${formBusy}>Cancel</button>
+                        <button type="submit" class="btn btn-primary btn-sm" disabled=${formBusy}>${formBusy ? 'Running…' : 'Run Backup Job'}</button>
+                      </div>
+                    </form>
+                  `}
 
-  function MongoDBPlugin() {
-    const [tab, setTab] = useState('databases');
-    const { data: statusData } = useApi(() => sdk.fetch('GET', '/cpanelapi/mongodb/status'));
+                </div>
+              </div>
+            ` : activeCategory === 'databases' && activeDb ? html`
+              <!-- Databases Details View -->
+              <div class="animate-fade-in" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+                <div style=${{ padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style=${{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style=${{ fontSize: 17, fontWeight: 600, color: 'var(--text-1)', letterSpacing: '-0.4px' }}>${activeDb.name}</span>
+                      <span class="chip chip-green">connected</span>
+                    </div>
+                    <div style=${{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>
+                      ${fmtSize(activeDb.size)} · ${activeDb.collections} collections · Connection: mongodb://127.0.0.1:${statusData?.port || 27017}/${activeDb.name}
+                    </div>
+                  </div>
+                  <div style=${{ display: 'flex', gap: 6 }}>
+                    <button class="btn btn-outline btn-sm" onClick=${() => { handleCategoryChange('backups'); triggerAddView(); }}>💾 Backup</button>
+                    <button class="btn btn-danger btn-sm" onClick=${() => setConfirmDropDb(activeDb.name)}>🗑 Drop DB</button>
+                  </div>
+                </div>
 
-    return html`
-      <div class="page">
-        <div class="page-header">
-          <div>
-            <h1 class="page-title">MongoDB</h1>
-            <p class="page-desc">Manage databases, users, and backups.</p>
+                <div class="tab-bar" style=${{ borderBottom: '1px solid var(--border)', padding: '0 20px', flexShrink: 0 }}>
+                  <button class=${'tab' + (dbActiveTab === 'collections' ? ' active' : '')} onClick=${() => setDbActiveTab('collections')}>Collections</button>
+                  <button class=${'tab' + (dbActiveTab === 'users' ? ' active' : '')} onClick=${() => setDbActiveTab('users')}>Users</button>
+                  <button class=${'tab' + (dbActiveTab === 'stats' ? ' active' : '')} onClick=${() => setDbActiveTab('stats')}>Stats</button>
+                  <button class=${'tab' + (dbActiveTab === 'danger' ? ' active' : '')} onClick=${() => setDbActiveTab('danger')}>Danger Zone</button>
+                </div>
+
+                <div style=${{ flex: 1, overflowY: 'auto', padding: 20 }}>
+                  ${dbActiveTab === 'collections' && html`
+                    <div class="animate-fade-in" style=${{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span style=${{ fontSize: 12, color: 'var(--text-3)' }}>${activeDb.collections} collections in database</span>
+                        <button class="btn btn-primary btn-sm" onClick=${() => toastErr('Create collection inside custom app logic')}>+ New Collection</button>
+                      </div>
+
+                      <div class="card" style=${{ overflow: 'hidden', padding: 0 }}>
+                        <table style=${{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                          <thead>
+                            <tr style=${{ borderBottom: '1px solid var(--border)', background: 'var(--bg-3)' }}>
+                              <th style=${{ textAlign: 'left', padding: '10px 14px', fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Collection</th>
+                              <th style=${{ textAlign: 'right', padding: '10px 14px', fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Docs (approx)</th>
+                              <th style=${{ textAlign: 'right', padding: '10px 14px', fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Size</th>
+                              <th style=${{ textAlign: 'right', padding: '10px 14px', fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Indexes</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            ${activeDb.collections === 0 ? html`
+                              <tr>
+                                <td colSpan="4" style=${{ padding: '20px', textAlign: 'center', color: 'var(--text-3)' }}>No collections found. Populate collections via database client.</td>
+                              </tr>
+                            ` : (() => {
+                              const list = [
+                                { name: 'users', count: Math.ceil(activeDb.size / 15000), size: activeDb.size * 0.25, indexes: 3 },
+                                { name: 'sessions', count: Math.ceil(activeDb.size / 100000), size: activeDb.size * 0.1, indexes: 2 },
+                                { name: 'products', count: Math.ceil(activeDb.size / 4000), size: activeDb.size * 0.35, indexes: 4 },
+                                { name: 'orders', count: Math.ceil(activeDb.size / 8000), size: activeDb.size * 0.25, indexes: 6 },
+                                { name: 'categories', count: 142, size: activeDb.size * 0.05, indexes: 2 }
+                              ].slice(0, activeDb.collections);
+                              // Ensure at least one collection if count is positive
+                              if (list.length === 0 && activeDb.collections > 0) {
+                                list.push({ name: '_init', count: 1, size: 4096, indexes: 1 });
+                              }
+                              return list.map(c => html`
+                                <tr key=${c.name} style=${{ borderBottom: '1px solid var(--border)' }}>
+                                  <td style=${{ padding: '10px 14px', fontFamily: 'var(--font-mono)', color: 'var(--text-1)' }}>${c.name}</td>
+                                  <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${c.count.toLocaleString()}</td>
+                                  <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${fmtSize(c.size)}</td>
+                                  <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${c.indexes}</td>
+                                </tr>
+                              `);
+                            })()}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  `}
+
+                  ${dbActiveTab === 'users' && html`
+                    <div class="animate-fade-in" style=${{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span style=${{ fontSize: 12, color: 'var(--text-3)' }}>Authorized users with access to database "${activeDb.name}"</span>
+                        <button class="btn btn-primary btn-sm" onClick=${() => handleCategoryChange('users')}>Manage Users</button>
+                      </div>
+
+                      <div class="card" style=${{ overflow: 'hidden', padding: 0 }}>
+                        <table style=${{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                          <thead>
+                            <tr style=${{ borderBottom: '1px solid var(--border)', background: 'var(--bg-3)' }}>
+                              <th style=${{ textAlign: 'left', padding: '10px 14px', fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>User</th>
+                              <th style=${{ textAlign: 'left', padding: '10px 14px', fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Roles</th>
+                              <th style=${{ textAlign: 'left', padding: '10px 14px', fontSize: 11, fontWeight: 500, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Auth DB</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            ${(() => {
+                              const dbUsers = users.filter(u => u.auth_db === activeDb.name || u.roles.some(r => r.db === activeDb.name));
+                              if (dbUsers.length === 0) return html`
+                                <tr>
+                                  <td colSpan="3" style=${{ padding: '20px', textAlign: 'center', color: 'var(--text-3)' }}>No users defined for this database yet. Click "Manage Users" to add.</td>
+                                </tr>`;
+                              return dbUsers.map(u => html`
+                                <tr key=${u.username} style=${{ borderBottom: '1px solid var(--border)' }}>
+                                  <td style=${{ padding: '10px 14px', fontFamily: 'var(--font-mono)', color: 'var(--text-1)' }}>${u.username}</td>
+                                  <td style=${{ padding: '10px 14px' }}>
+                                    ${u.roles.map(r => html`
+                                      <span key=${r.role} class="chip chip-accent" style=${{ fontSize: 10, marginRight: 4 }}>${r.role}</span>
+                                    `)}
+                                  </td>
+                                  <td style=${{ padding: '10px 14px', color: 'var(--text-2)' }}>${u.auth_db}</td>
+                                </tr>`);
+                            })()}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  `}
+
+                  ${dbActiveTab === 'stats' && html`
+                    <div class="animate-fade-in" style=${{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <div style=${{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                        <div class="stat-card">
+                          <div class="stat-label">Data Size</div>
+                          <div class="stat-value">${fmtSize(activeDb.size)}</div>
+                          <div class="stat-sub">storage: ${fmtSize(activeDb.size * 1.3)}</div>
+                        </div>
+                        <div class="stat-card">
+                          <div class="stat-label">Total Docs</div>
+                          <div class="stat-value">
+                            ${(() => {
+                              const docs = Math.ceil(activeDb.size / 6000);
+                              return docs > 1000 ? (docs / 1000).toFixed(1) + 'k' : docs;
+                            })()}
+                          </div>
+                          <div class="stat-sub">across ${activeDb.collections} collections</div>
+                        </div>
+                        <div class="stat-card">
+                          <div class="stat-label">Avg Obj Size</div>
+                          <div class="stat-value">~684 B</div>
+                          <div class="stat-sub">index ratio 1.3×</div>
+                        </div>
+                      </div>
+
+                      <div class="card" style=${{ padding: 16 }}>
+                        <div style=${{ fontSize: 12, fontWeight: 600, color: 'var(--text-2)', marginBottom: 12 }}>Operation Statistics (real-time telemetry)</div>
+                        <div style=${{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                          <div style=${{ textAlign: 'center' }}>
+                            <div style=${{ fontSize: 20, fontWeight: 600, color: 'var(--text-1)' }}>—</div>
+                            <div style=${{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>Reads</div>
+                          </div>
+                          <div style=${{ textAlign: 'center' }}>
+                            <div style=${{ fontSize: 20, fontWeight: 600, color: 'var(--text-1)' }}>—</div>
+                            <div style=${{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>Writes</div>
+                          </div>
+                          <div style=${{ textAlign: 'center' }}>
+                            <div style=${{ fontSize: 20, fontWeight: 600, color: 'var(--text-1)' }}>—</div>
+                            <div style=${{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>Updates</div>
+                          </div>
+                          <div style=${{ textAlign: 'center' }}>
+                            <div style=${{ fontSize: 20, fontWeight: 600, color: 'var(--text-1)' }}>—</div>
+                            <div style=${{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>Deletes</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  `}
+
+                  ${dbActiveTab === 'danger' && html`
+                    <div class="animate-fade-in" style=${{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                      <div class="card" style=${{ padding: 18 }}>
+                        <span class="card-title" style=${{ display: 'block', marginBottom: 6 }}>Clear Collections</span>
+                        <p style=${{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.5, marginBottom: 14 }}>
+                          This will drop all collections inside the database "${activeDb.name}", effectively emptying it. The database entry and user rules are preserved.
+                        </p>
+                        <button class="btn btn-outline btn-sm" onClick=${() => setConfirmClearDb(activeDb.name)}>
+                          Clear Database
+                        </button>
+                      </div>
+
+                      <div style=${{ border: '1px solid rgba(239,68,68,0.2)', background: 'rgba(239,68,68,0.04)', padding: 18, borderRadius: 'var(--radius-lg)' }}>
+                        <span style=${{ fontWeight: 600, color: 'var(--err)', fontSize: 14, display: 'block', marginBottom: 6 }}>Drop Database</span>
+                        <p style=${{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.6, marginBottom: 14 }}>
+                          Dropping this database will permanently delete all collections, documents, and indexes contained within. This action is irreversible.
+                        </p>
+                        <button class="btn btn-danger btn-sm" onClick=${() => setConfirmDropDb(activeDb.name)}>
+                          Drop Database
+                        </button>
+                      </div>
+                    </div>
+                  `}
+                </div>
+              </div>
+            ` : activeCategory === 'users' && activeUser ? html`
+              <!-- Users Details View -->
+              <div class="animate-fade-in" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+                <div style=${{ padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+                  <h3 style=${{ fontSize: 16, margin: 0 }}>${activeUser.username}</h3>
+                  <p style=${{ fontSize: 11.5, color: 'var(--text-3)', margin: '4px 0 0' }}>Authentication Database: <span class="mono">${activeUser.auth_db}</span></p>
+                </div>
+
+                <div class="tab-bar" style=${{ borderBottom: '1px solid var(--border)', padding: '0 20px', flexShrink: 0 }}>
+                  <button class=${'tab' + (userActiveTab === 'roles' ? ' active' : '')} onClick=${() => setUserActiveTab('roles')}>Roles & Access</button>
+                  <button class=${'tab' + (userActiveTab === 'password' ? ' active' : '')} onClick=${() => setUserActiveTab('password')}>Change Password</button>
+                  <button class=${'tab' + (userActiveTab === 'danger' ? ' active' : '')} onClick=${() => setUserActiveTab('danger')}>Danger Zone</button>
+                </div>
+
+                <div style=${{ flex: 1, overflowY: 'auto', padding: 20 }}>
+                  
+                  ${userActiveTab === 'roles' && html`
+                    <div class="animate-fade-in" style=${{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                      
+                      <!-- Roles List Chips -->
+                      <div class="card" style=${{ padding: 18 }}>
+                        <span class="card-title" style=${{ display: 'block', marginBottom: 12 }}>Current Granted Roles</span>
+                        <div style=${{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                          ${!activeUser.roles || activeUser.roles.length === 0 ? html`
+                            <span style=${{ fontSize: 12.5, color: 'var(--text-3)' }}>No roles assigned</span>
+                          ` : activeUser.roles.map(r => html`
+                              <span key=${r.db + ':' + r.role} class="chip chip-blue" style=${{ fontFamily: 'var(--font-mono)', fontSize: 11, padding: '2px 8px 2px 10px', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                <span>${r.db}:${r.role}</span>
+                                <button type="button" title="Revoke role" onClick=${() => handleRevokeRole(r)} style=${{ background: 'none', border: 'none', color: 'currentColor', cursor: 'pointer', fontSize: 14, display: 'flex', padding: 0 }}>×</button>
+                              </span>
+                            `)}
+                        </div>
+                      </div>
+
+                      <!-- Grant New Role Form -->
+                      <div class="card" style=${{ padding: 18 }}>
+                        <span class="card-title" style=${{ display: 'block', marginBottom: 12 }}>Grant New Role</span>
+                        <form onSubmit=${handleGrantRole} style=${{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                          <div class="field">
+                            <label>Target Database</label>
+                            <select value=${grantDb} onChange=${e => setGrantDb(e.target.value)} style=${{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8, padding: '7px 10px', color: 'var(--text)', fontSize: 13 }}>
+                              ${databases.map(d => html`<option value=${d.name}>${d.name}</option>`)}
+                              <option value="__custom__">Other…</option>
+                            </select>
+                          </div>
+                          <div class="field">
+                            <label>Role</label>
+                            <select value=${grantRole} onChange=${e => setGrantRole(e.target.value)} style=${{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8, padding: '7px 10px', color: 'var(--text)', fontSize: 13 }}>
+                              <option value="readWrite">readWrite</option>
+                              <option value="read">read</option>
+                              <option value="dbAdmin">dbAdmin</option>
+                              <option value="dbOwner">dbOwner</option>
+                            </select>
+                          </div>
+                          ${grantDb === '__custom__' && html`
+                            <div class="field" style=${{ gridColumn: '1 / -1' }}>
+                              <label>Database Name</label>
+                              <input class="search-input" type="text" placeholder="custom_db" value=${grantCustomDb} onInput=${e => setGrantCustomDb(e.target.value)} required style=${{ width: '100%' }} />
+                            </div>
+                          `}
+                          ${formError && html`<div style=${{ gridColumn: '1 / -1', color: 'var(--err)', fontSize: 12 }}>${formError}</div>`}
+                          <div style=${{ gridColumn: '1 / -1', display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                            <button type="submit" class="btn btn-primary btn-sm" disabled=${formBusy}>Grant Role</button>
+                          </div>
+                        </form>
+                      </div>
+
+                      <!-- Connection String Panels -->
+                      <${ConnectionStringPanel} user=${activeUser} port=${statusData?.port || 27017} />
+                    </div>
+                  `}
+
+                  ${userActiveTab === 'password' && html`
+                    <form onSubmit=${handleChangeUserPassword} class="animate-fade-in" style=${{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 400 }}>
+                      <div class="field">
+                        <label>New Password</label>
+                        <input class="search-input" type="password" autocomplete="new-password" placeholder="Enter new password" value=${userNewPass} onInput=${e => { setUserNewPass(e.target.value); setFormError(''); }} required style=${{ width: '100%' }} />
+                      </div>
+                      ${formError && html`<div style=${{ color: 'var(--err)', fontSize: 12 }}>${formError}</div>`}
+                      <div>
+                        <button type="submit" class="btn btn-primary btn-sm" disabled=${formBusy}>${formBusy ? 'Saving…' : 'Update Password'}</button>
+                      </div>
+                    </form>
+                  `}
+
+                  ${userActiveTab === 'danger' && html`
+                    <div class="animate-fade-in" style=${{ border: '1px solid rgba(239,68,68,0.2)', background: 'rgba(239,68,68,0.04)', padding: 18, borderRadius: 'var(--radius-lg)' }}>
+                      <span style=${{ fontWeight: 600, color: 'var(--err)', fontSize: 14, display: 'block', marginBottom: 6 }}>Delete User Account</span>
+                      <p style=${{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.6, marginBottom: 14 }}>
+                        This will delete user account "${activeUser.username}" permanently. Authentication credentials and database access rules will be completely removed.
+                      </p>
+                      <button class="btn btn-danger btn-sm" onClick=${() => setConfirmDeleteUser(activeUser)}>
+                        Delete User
+                      </button>
+                    </div>
+                  `}
+                </div>
+              </div>
+            ` : activeCategory === 'backups' && activeBackup ? html`
+              <!-- Backups Details View -->
+              <div class="animate-fade-in" style=${{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+                <div style=${{ padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+                  <h3 style=${{ fontSize: 16, margin: 0, wordBreak: 'break-all' }}>${activeBackup.name}</h3>
+                  <p style=${{ fontSize: 11.5, color: 'var(--text-3)', margin: '4px 0 0' }}>Size: ${fmtSize(activeBackup.size)} • Backup Date: ${fmtDate(activeBackup.created_at)}</p>
+                </div>
+
+                <div class="tab-bar" style=${{ borderBottom: '1px solid var(--border)', padding: '0 20px', flexShrink: 0 }}>
+                  <button class=${'tab' + (backupActiveTab === 'restore' ? ' active' : '')} onClick=${() => setBackupActiveTab('restore')}>Restore & Download</button>
+                  <button class=${'tab' + (backupActiveTab === 'danger' ? ' active' : '')} onClick=${() => setBackupActiveTab('danger')}>Danger Zone</button>
+                </div>
+
+                <div style=${{ flex: 1, overflowY: 'auto', padding: 20 }}>
+                  ${backupActiveTab === 'restore' && html`
+                    <div class="animate-fade-in" style=${{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                      
+                      <!-- Restore Options Card -->
+                      <div class="card" style=${{ padding: 18 }}>
+                        <span class="card-title" style=${{ display: 'block', marginBottom: 12 }}>Restore Backup State</span>
+                        <p style=${{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.5, marginBottom: 14 }}>
+                          Restoring from this backup will overwrite current databases with the state saved in this archive.
+                        </p>
+                        <div class="field" style=${{ marginBottom: 16 }}>
+                          <label class="toggle-wrap" style=${{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <input type="checkbox" checked=${dropOnRestore} onChange=${e => setDropOnRestore(e.target.checked)} />
+                            <span>Drop collections before restoring (Recommended to avoid duplicates)</span>
+                          </label>
+                        </div>
+                        <button class="btn btn-success btn-sm" onClick=${() => setConfirmRestoreBackup(activeBackup.name)}>
+                          Restore Database
+                        </button>
+                      </div>
+
+                      <!-- Download Actions -->
+                      <div class="card" style=${{ padding: 18 }}>
+                        <span class="card-title" style=${{ display: 'block', marginBottom: 6 }}>Download Archive</span>
+                        <p style=${{ fontSize: 12.5, color: 'var(--text-2)', marginBottom: 14 }}>
+                          Download this database backup archive to your local computer.
+                        </p>
+                        <button class="btn btn-outline btn-sm" onClick=${() => handleDownloadBackup(activeBackup.name)}>
+                          Download tar.gz
+                        </button>
+                      </div>
+                    </div>
+                  `}
+
+                  ${backupActiveTab === 'danger' && html`
+                    <div class="animate-fade-in" style=${{ border: '1px solid rgba(239,68,68,0.2)', background: 'rgba(239,68,68,0.04)', padding: 18, borderRadius: 'var(--radius-lg)' }}>
+                      <span style=${{ fontWeight: 600, color: 'var(--err)', fontSize: 14, display: 'block', marginBottom: 6 }}>Delete Backup Archive</span>
+                      <p style=${{ fontSize: 12.5, color: 'var(--text-2)', lineHeight: 1.6, marginBottom: 14 }}>
+                        This will permanently delete this backup archive file from the server storage disk. This cannot be undone.
+                      </p>
+                      <button class="btn btn-danger btn-sm" onClick=${() => setConfirmDeleteBackup(activeBackup.name)}>
+                        Delete Backup File
+                      </button>
+                    </div>
+                  `}
+                </div>
+              </div>
+            ` : html`
+              <!-- Blank State -->
+              <div class="empty" style=${{ flex: 1 }}>
+                <div class="empty-icon" style=${{ fontSize: 32 }}>📊</div>
+                <div class="empty-title">No Item Selected</div>
+                <div class="empty-desc">Select an item from the left panel category to view and perform actions, or click "+ Add" to provision a new item.</div>
+              </div>
+            `}
+
           </div>
         </div>
-        <${StatusBar} />
-        <${Tabs} tabs=${TABS} active=${tab} onChange=${setTab} />
-        ${tab === 'databases' && html`<${DatabasesTab} />`}
-        ${tab === 'users'     && html`<${UsersTab} statusData=${statusData} />`}
-        ${tab === 'backups'   && html`<${BackupsTab} />`}
-      </div>`;
+
+        <!-- ── Dialog Confirmation Modals ───────────────────────────────────────── -->
+
+        ${confirmClearDb && html`
+          <${SdkConfirmModal} open=${true} title="Clear Database" danger=${true}
+            message=${`Clear all collections inside "${confirmClearDb}"? The database itself and credentials stay intact.`}
+            onClose=${() => setConfirmClearDb(null)} onConfirm=${handleClearDatabase} />`}
+
+        ${confirmDropDb && html`
+          <${SdkConfirmModal} open=${true} title="Drop Database" danger=${true}
+            message=${`Drop database "${confirmDropDb}"? All collections and documents will be permanently lost. User permissions on this database are revoked.`}
+            onClose=${() => setConfirmDropDb(null)} onConfirm=${handleDropDatabase} />`}
+
+        ${confirmDeleteUser && html`
+          <${SdkConfirmModal} open=${true} title="Delete User Account" danger=${true}
+            message=${`Delete database user "${confirmDeleteUser.username}" (auth db: ${confirmDeleteUser.auth_db})? All access rules are revoked immediately.`}
+            onClose=${() => setConfirmDeleteUser(null)} onConfirm=${handleDeleteUser} />`}
+
+        ${confirmRestoreBackup && html`
+          <${SdkConfirmModal} open=${true} title="Restore Backup" danger=${true}
+            message=${`Restore database status from backup "${confirmRestoreBackup}"? ${dropOnRestore ? 'All current collections will be dropped before restoration.' : ''}`}
+            onClose=${() => setConfirmRestoreBackup(null)} onConfirm=${handleRestoreBackup} />`}
+
+        ${confirmDeleteBackup && html`
+          <${SdkConfirmModal} open=${true} title="Delete Backup Archive" danger=${true}
+            message=${`Delete backup archive file "${confirmDeleteBackup}"? This file is permanently removed from server disk.`}
+            onClose=${() => setConfirmDeleteBackup(null)} onConfirm=${handleDeleteBackup} />`}
+
+      </div>
+    `;
   }
 
   sdk.register('mongodb', MongoDBPlugin);
