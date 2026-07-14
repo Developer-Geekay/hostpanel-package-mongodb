@@ -29,5 +29,6 @@ PLUGIN_MANIFEST = {
         "label": "MongoDB",
         "icon": "database",
         "can_reload": False,
+        "config_path": "/opt/hostpanel/plugins/mongodb/mongod.conf",
     },
 }
