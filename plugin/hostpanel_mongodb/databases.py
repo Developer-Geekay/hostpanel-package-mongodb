@@ -38,6 +38,40 @@ def _get_port() -> int:
     return 27017
 
 
+def _get_bind_ip() -> str:
+    try:
+        with open(CONF_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("bindIp:"):
+                    return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def _auth_enabled() -> bool:
+    """True when mongod.conf enables security.authorization — without it,
+    credentials are not enforced and the server must stay loopback-only."""
+    try:
+        with open(CONF_FILE) as f:
+            in_security = False
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("security:"):
+                    in_security = True
+                    continue
+                if in_security:
+                    if line[:1] not in (" ", "\t"):
+                        in_security = False
+                        continue
+                    if stripped.startswith("authorization:"):
+                        return stripped.split(":", 1)[1].strip().lower() == "enabled"
+    except Exception:
+        pass
+    return False
+
+
 def _client():
     port = _get_port()
     try:
@@ -56,14 +90,19 @@ def _client():
 @router.get("/status")
 async def get_status(_: User = Depends(require_admin)):
     port = _get_port()
+    base = {
+        "port": port,
+        "bind_ip": _get_bind_ip(),
+        "auth_enabled": _auth_enabled(),
+    }
     try:
         from pymongo import MongoClient
         c = MongoClient(f"mongodb://localhost:{port}/", serverSelectionTimeoutMS=2000)
         info = c.server_info()
         c.close()
-        return {"running": True, "version": info.get("version"), "port": port}
+        return {"running": True, "version": info.get("version"), **base}
     except Exception:
-        return {"running": False, "version": None, "port": port}
+        return {"running": False, "version": None, **base}
 
 
 @router.get("/count")
