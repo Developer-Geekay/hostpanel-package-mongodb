@@ -83,6 +83,20 @@ def _download_mongod():
 
 
 def _write_config():
+    # The security posture lives in the core DB (mongodb_settings) so package
+    # updates re-apply it instead of resetting an exposed server to open.
+    try:
+        from hostpanel_mongodb import settings
+        bind_ip = settings.bind_ip()
+        auth = settings.auth_enabled()
+    except Exception as exc:
+        logger.warning("Could not read mongodb settings, using safe defaults: %s", exc)
+        bind_ip, auth = "127.0.0.1", False
+    if bind_ip != "127.0.0.1" and not auth:
+        # Never materialize a config that is both exposed and unauthenticated.
+        logger.warning("Refusing wide bindIp without auth enforcement; falling back to loopback")
+        bind_ip = "127.0.0.1"
+    security_block = "\nsecurity:\n  authorization: enabled\n" if auth else ""
     config = f"""\
 storage:
   dbPath: {DATA_DIR}
@@ -94,8 +108,8 @@ systemLog:
 
 net:
   port: 27017
-  bindIp: 127.0.0.1
-
+  bindIp: {bind_ip}
+{security_block}
 processManagement:
   timeZoneInfo: /usr/share/zoneinfo
 """

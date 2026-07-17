@@ -207,6 +207,9 @@
     const [dropOnRestore, setDropOnRestore] = useState(false);
 
     // Confirm Modals states
+    const [showAccess, setShowAccess] = useState(false);
+    const [accessBusy, setAccessBusy] = useState(false);
+    const [confirmAccess, setConfirmAccess] = useState(null); // { auth_enabled, bind_ip, title, message }
     const [confirmDropDb, setConfirmDropDb] = useState(null);
     const [confirmClearDb, setConfirmClearDb] = useState(null);
     const [confirmDeleteUser, setConfirmDeleteUser] = useState(null);
@@ -497,6 +500,9 @@
             </p>
           </div>
           <div style=${{ display: 'flex', gap: 8 }}>
+            <button class="btn btn-outline btn-sm" onClick=${() => setShowAccess(true)}>
+              🔐 Access
+            </button>
             <button class="btn btn-outline btn-sm" onClick=${() => toastErr('Mongo Shell feature coming soon')} disabled=${statusData && !statusData.running}>
               🐚 Mongo Shell
             </button>
@@ -1034,6 +1040,90 @@
 
           </div>
         </div>
+
+        <!-- ── Access control overlay ──────────────────────────────────────────── -->
+
+        ${showAccess && html`
+          <div style=${{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 90, display: 'flex', alignItems: 'center', justifyContent: 'center' }} onClick=${() => !accessBusy && setShowAccess(false)}>
+            <div class="card" style=${{ width: 560, maxWidth: '92vw', padding: 20 }} onClick=${e => e.stopPropagation()}>
+              <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <div style=${{ fontSize: 14, fontWeight: 600 }}>🔐 Network Access</div>
+                <button class="btn btn-ghost btn-xs" onClick=${() => setShowAccess(false)} disabled=${accessBusy}>✕ Close</button>
+              </div>
+              <p style=${{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.55, margin: '0 0 16px' }}>
+                Two locks, opened in order: credentials become mandatory first, only then may MongoDB
+                listen beyond this machine. Each change restarts MongoDB (a few seconds of downtime)
+                and is rolled back automatically if the server doesn't come back healthy.
+              </p>
+
+              <div style=${{ display: 'grid', gap: 10 }}>
+                <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8 }}>
+                  <div>
+                    <div style=${{ fontSize: 12.5, fontWeight: 600 }}>1 · Authorization enforcement</div>
+                    <div style=${{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 2 }}>
+                      ${statusData?.auth_enabled
+                        ? 'Enforced — every connection must authenticate.'
+                        : 'Off — passwords are not checked; loopback binding is the only protection.'}
+                    </div>
+                  </div>
+                  ${statusData?.auth_enabled
+                    ? html`<button class="btn btn-outline btn-sm" disabled=${accessBusy || statusData?.bind_ip !== '127.0.0.1'}
+                        title=${statusData?.bind_ip !== '127.0.0.1' ? 'Restrict to loopback first' : ''}
+                        onClick=${() => setConfirmAccess({ auth_enabled: false, bind_ip: '127.0.0.1', title: 'Disable Authorization',
+                          message: 'Disable credential enforcement? Only allowed while MongoDB is loopback-only. Apps keep working (they simply stop being checked).' })}>
+                        Disable</button>`
+                    : html`<button class="btn btn-primary btn-sm" disabled=${accessBusy || !statusData?.running}
+                        onClick=${() => setConfirmAccess({ auth_enabled: true, bind_ip: statusData?.bind_ip || '127.0.0.1', title: 'Enforce Authorization',
+                          message: 'Enable credential enforcement? The panel mints its own admin credential first so management keeps working. Every app must connect with a valid username and password after this — verify your app connection strings include them.' })}>
+                        Enable</button>`}
+                </div>
+
+                <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8 }}>
+                  <div>
+                    <div style=${{ fontSize: 12.5, fontWeight: 600 }}>2 · Network exposure</div>
+                    <div style=${{ fontSize: 11.5, color: 'var(--text-3)', marginTop: 2 }}>
+                      ${statusData?.bind_ip === '0.0.0.0'
+                        ? 'Listening on all interfaces — reachable from the network (and the internet if the router forwards 27017).'
+                        : 'Loopback only — reachable from this server alone.'}
+                    </div>
+                  </div>
+                  ${statusData?.bind_ip === '0.0.0.0'
+                    ? html`<button class="btn btn-outline btn-sm" disabled=${accessBusy}
+                        onClick=${() => setConfirmAccess({ auth_enabled: statusData?.auth_enabled ?? true, bind_ip: '127.0.0.1', title: 'Restrict to Loopback',
+                          message: 'Bind MongoDB back to 127.0.0.1? Remote clients (including tunnel-free Compass sessions) disconnect; on-server apps are unaffected.' })}>
+                        Restrict</button>`
+                    : html`<button class="btn btn-danger btn-sm" disabled=${accessBusy || !statusData?.auth_enabled}
+                        title=${!statusData?.auth_enabled ? 'Enforce authorization first' : ''}
+                        onClick=${() => setConfirmAccess({ auth_enabled: true, bind_ip: '0.0.0.0', title: 'Open to the Network',
+                          message: 'Bind MongoDB to 0.0.0.0? With your router forwarding 27017, this makes the server reachable from the public internet, protected only by its user credentials. Make sure every account has a strong password.' })}>
+                        Open (0.0.0.0)</button>`}
+                </div>
+              </div>
+
+              ${accessBusy && html`<div style=${{ marginTop: 12, fontSize: 12, color: 'var(--text-3)' }}>Applying and restarting MongoDB…</div>`}
+            </div>
+          </div>
+        `}
+
+        ${confirmAccess && html`
+          <${SdkConfirmModal} open=${true} title=${confirmAccess.title} danger=${true}
+            message=${confirmAccess.message}
+            onClose=${() => setConfirmAccess(null)}
+            onConfirm=${async () => {
+              const req = confirmAccess;
+              setConfirmAccess(null);
+              setAccessBusy(true);
+              try {
+                await sdk.fetch('PUT', '/cpanelapi/mongodb/access', { auth_enabled: req.auth_enabled, bind_ip: req.bind_ip });
+                ok('MongoDB access updated');
+                refetchStatus();
+              } catch (e) {
+                toastErr(e.message || 'Access change failed');
+                refetchStatus();
+              } finally {
+                setAccessBusy(false);
+              }
+            }} />`}
 
         <!-- ── Dialog Confirmation Modals ───────────────────────────────────────── -->
 
