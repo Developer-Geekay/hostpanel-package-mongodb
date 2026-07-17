@@ -26,16 +26,38 @@
 
   // ── Connection String Clipboard Component ─────────────────────────────────
 
-  function ConnectionStringPanel({ user, port }) {
+  function ConnectionStringPanel({ user, port, bindIp, authEnabled }) {
     const [lang, setLang] = useState('mongosh');
+    const [scope, setScope] = useState('local');
     if (!user) return null;
 
-    const host = '127.0.0.1';
-    const base = `mongodb://${user.username}:<password>@${host}:${port}/${user.auth_db}`;
+    // Panel origin hostname, never a raw IP — resolves to this server.
+    const publicHost = window.location.hostname;
+    const tunnelPort = port === 27018 ? 27019 : 27018; // avoid clashing with a local mongod on the client machine
+    const loopbackOnly = !bindIp || bindIp === '127.0.0.1' || bindIp === 'localhost';
+
+    const SCOPES = [
+      { id: 'local', label: 'On-server' },
+      { id: 'tunnel', label: 'SSH tunnel' },
+      { id: 'remote', label: 'Direct remote' },
+    ];
+
+    const uri = (host, p, params) =>
+      `mongodb://${user.username}:<password>@${host}:${p}/${user.auth_db}${params ? '?' + params : ''}`;
+
+    // directConnection: stops drivers from re-resolving to the server's own
+    // advertised address (which is loopback on the Pi) and going nowhere.
+    const base = scope === 'local' ? uri('127.0.0.1', port)
+      : scope === 'tunnel' ? uri('127.0.0.1', tunnelPort, 'directConnection=true')
+      : uri(publicHost, port, 'directConnection=true');
+
+    const tunnelCmd = `ssh -L ${tunnelPort}:127.0.0.1:${port} <ssh-user>@${publicHost}`;
+
     const snippets = {
       mongosh: `mongosh "${base}"`,
       nodejs:  `mongoose.connect('${base}')`,
       python:  `MongoClient('${base}')`,
+      compass: base,
     };
 
     const copy = (text) => {
@@ -44,26 +66,67 @@
 
     return html`
       <div style=${{ marginTop: 16, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
-        <div style=${{ padding: '10px 16px', background: 'var(--bg-2)', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style=${{ padding: '10px 16px', background: 'var(--bg-2)', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
           <div style=${{ fontSize: 12.5, color: 'var(--text-2)' }}>
             Connect as <span style=${{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>${user.username}</span>
           </div>
-          <div style=${{ display: 'flex', background: 'var(--bg-3)', borderRadius: 6, padding: 2 }}>
-            ${['mongosh', 'nodejs', 'python'].map(l => html`
-              <button key=${l} onClick=${() => setLang(l)} style=${{
-                padding: '3px 10px', fontSize: 11, border: 'none', cursor: 'pointer',
-                borderRadius: 4, fontWeight: 500, transition: 'background 0.15s',
-                background: lang === l ? 'var(--accent)' : 'transparent',
-                color: lang === l ? '#fff' : 'var(--text-3)',
-              }}>${l}</button>`)}
+          <div style=${{ display: 'flex', gap: 8 }}>
+            <div style=${{ display: 'flex', background: 'var(--bg-3)', borderRadius: 6, padding: 2 }}>
+              ${SCOPES.map(s => html`
+                <button key=${s.id} onClick=${() => setScope(s.id)} style=${{
+                  padding: '3px 10px', fontSize: 11, border: 'none', cursor: 'pointer',
+                  borderRadius: 4, fontWeight: 500, transition: 'background 0.15s',
+                  background: scope === s.id ? 'var(--accent)' : 'transparent',
+                  color: scope === s.id ? '#fff' : 'var(--text-3)',
+                }}>${s.label}</button>`)}
+            </div>
+            <div style=${{ display: 'flex', background: 'var(--bg-3)', borderRadius: 6, padding: 2 }}>
+              ${['mongosh', 'nodejs', 'python', 'compass'].map(l => html`
+                <button key=${l} onClick=${() => setLang(l)} style=${{
+                  padding: '3px 10px', fontSize: 11, border: 'none', cursor: 'pointer',
+                  borderRadius: 4, fontWeight: 500, transition: 'background 0.15s',
+                  background: lang === l ? 'var(--accent)' : 'transparent',
+                  color: lang === l ? '#fff' : 'var(--text-3)',
+                }}>${l}</button>`)}
+            </div>
           </div>
         </div>
+
+        ${scope === 'tunnel' && html`
+          <div style=${{ padding: '12px 16px', background: 'var(--bg-3)', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style=${{ flex: 1, minWidth: 0 }}>
+              <div style=${{ fontSize: 10.5, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>Step 1 — open the tunnel (keep it running)</div>
+              <code style=${{ fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'var(--text-1)', wordBreak: 'break-all', lineHeight: 1.6 }}>${tunnelCmd}</code>
+            </div>
+            <button class="btn btn-ghost btn-xs" onClick=${() => copy(tunnelCmd)}>Copy</button>
+          </div>
+        `}
+
         <div style=${{ padding: '12px 16px', background: 'var(--bg-3)', display: 'flex', alignItems: 'center', gap: 12 }}>
+          ${scope === 'tunnel' && html`<div style=${{ fontSize: 10.5, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.06em', flexShrink: 0 }}>Step 2</div>`}
           <code style=${{ fontSize: 11.5, fontFamily: 'var(--font-mono)', color: 'var(--text-1)', wordBreak: 'break-all', flex: 1, lineHeight: 1.6 }}>${snippets[lang]}</code>
           <button class="btn btn-ghost btn-xs" onClick=${() => copy(snippets[lang])}>Copy</button>
         </div>
+
         <div style=${{ padding: '8px 16px', background: 'var(--bg-2)', fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.5 }}>
-          Replace <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>&lt;password&gt;</code> with actual password. For remote access, replace <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>127.0.0.1</code> with your domain/IP.
+          ${scope === 'local' && html`
+            For apps running on this server (use this in app environment variables). Replace
+            <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>&lt;password&gt;</code> with the actual password.
+          `}
+          ${scope === 'tunnel' && html`
+            Works from anywhere you can SSH — traffic rides the encrypted tunnel; MongoDB stays private.
+            Replace <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>&lt;ssh-user&gt;</code> and
+            <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>&lt;password&gt;</code> with real values.
+          `}
+          ${scope === 'remote' && (loopbackOnly ? html`
+            <span style=${{ color: 'var(--err)' }}>⚠ Not reachable right now:</span> MongoDB is bound to
+            <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>127.0.0.1</code> (loopback only)${authEnabled ? '' : ' and authorization is not enforced'}.
+            Exposing it directly to the internet is not recommended — use the SSH tunnel instead. Direct access would require
+            auth enforcement, a wider bindIp, and a router port-forward.
+          ` : html`
+            Direct connection over the network. Make sure port ${port} is firewalled to trusted sources —
+            the whole internet scans for open MongoDB ports.
+          `)}
         </div>
       </div>`;
   }
@@ -870,7 +933,7 @@
                       </div>
 
                       <!-- Connection String Panels -->
-                      <${ConnectionStringPanel} user=${activeUser} port=${statusData?.port || 27017} />
+                      <${ConnectionStringPanel} user=${activeUser} port=${statusData?.port || 27017} bindIp=${statusData?.bind_ip} authEnabled=${statusData?.auth_enabled} />
                     </div>
                   `}
 
