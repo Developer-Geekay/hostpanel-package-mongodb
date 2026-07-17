@@ -72,11 +72,33 @@ def _auth_enabled() -> bool:
     return False
 
 
+def _admin_uri() -> str:
+    """Panel-side connection URI. Once authorization is enforced, the panel
+    authenticates with its own root credential (minted when enforcement was
+    enabled, stored in the core DB)."""
+    from urllib.parse import quote
+    from hostpanel_mongodb import settings
+    creds = settings.admin_credentials()
+    if settings.auth_enabled() and creds:
+        user, password = creds
+        return f"mongodb://{quote(user, safe='')}:{quote(password, safe='')}@localhost:{_get_port()}/?authSource=admin"
+    return f"mongodb://localhost:{_get_port()}/"
+
+
+def _tool_auth_args() -> list:
+    """Extra CLI args for mongodump/mongorestore when auth is enforced."""
+    from hostpanel_mongodb import settings
+    creds = settings.admin_credentials()
+    if settings.auth_enabled() and creds:
+        user, password = creds
+        return ["--username", user, "--password", password, "--authenticationDatabase", "admin"]
+    return []
+
+
 def _client():
-    port = _get_port()
     try:
         from pymongo import MongoClient
-        c = MongoClient(f"mongodb://localhost:{port}/", serverSelectionTimeoutMS=3000)
+        c = MongoClient(_admin_uri(), serverSelectionTimeoutMS=3000, directConnection=True)
         c.admin.command("ping")
         return c
     except ImportError:
@@ -97,7 +119,7 @@ async def get_status(_: User = Depends(require_admin)):
     }
     try:
         from pymongo import MongoClient
-        c = MongoClient(f"mongodb://localhost:{port}/", serverSelectionTimeoutMS=2000)
+        c = MongoClient(_admin_uri(), serverSelectionTimeoutMS=2000, directConnection=True)
         info = c.server_info()
         c.close()
         return {"running": True, "version": info.get("version"), **base}
@@ -109,13 +131,103 @@ async def get_status(_: User = Depends(require_admin)):
 async def db_count(_: User = Depends(require_admin)):
     try:
         from pymongo import MongoClient
-        port = _get_port()
-        c = MongoClient(f"mongodb://localhost:{port}/", serverSelectionTimeoutMS=2000)
+        c = MongoClient(_admin_uri(), serverSelectionTimeoutMS=2000, directConnection=True)
         count = len([d for d in c.list_database_names() if d not in SYSTEM_DBS])
         c.close()
         return {"count": count}
     except Exception:
         return {"count": 0}
+
+
+# ── Access control (auth enforcement + bind scope) ────────────────────────────
+
+PANEL_ADMIN_USER = "hostpanel_admin"
+ALLOWED_BIND_IPS = {"127.0.0.1", "0.0.0.0"}
+
+
+class AccessRequest(BaseModel):
+    auth_enabled: bool
+    bind_ip: str = "127.0.0.1"
+
+
+def _ensure_panel_admin(c) -> None:
+    """Mint (or refresh) the panel's own root credential before enforcement
+    turns on — the panel's client connects unauthenticated today and would
+    lock itself out otherwise."""
+    import secrets as pysecrets
+    from hostpanel_mongodb import settings
+    password = pysecrets.token_urlsafe(24)
+    try:
+        c.admin.command("createUser", PANEL_ADMIN_USER, pwd=password, roles=[{"role": "root", "db": "admin"}])
+    except Exception:
+        c.admin.command("updateUser", PANEL_ADMIN_USER, pwd=password)
+    settings.set("admin_user", PANEL_ADMIN_USER)
+    settings.set("admin_pass", password)
+
+
+def _apply_access(auth_enabled: bool, bind_ip: str) -> None:
+    from hostpanel_mongodb import lifecycle, settings
+    settings.set("auth_enabled", "1" if auth_enabled else "0")
+    settings.set("bind_ip", bind_ip)
+    lifecycle._write_config()
+    r = subprocess.run(["sudo", "-n", "systemctl", "restart", "hostpanel-mongodb"],
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise HTTPException(500, f"MongoDB restart failed: {r.stderr.strip() or r.stdout.strip()}")
+
+
+@router.get("/access")
+async def get_access(_: User = Depends(require_admin)):
+    from hostpanel_mongodb import settings
+    return {
+        "auth_enabled": _auth_enabled(),
+        "bind_ip": _get_bind_ip(),
+        "panel_admin_ready": settings.admin_credentials() is not None,
+    }
+
+
+@router.put("/access")
+async def set_access(body: AccessRequest, user: User = Depends(require_admin)):
+    from hostpanel_mongodb import audit, settings
+
+    bind_ip = body.bind_ip.strip()
+    if bind_ip not in ALLOWED_BIND_IPS:
+        raise HTTPException(400, "bind_ip must be 127.0.0.1 or 0.0.0.0")
+    # The interlock: never exposed without enforcement, in either order of
+    # operations. Disabling auth while exposed is rejected the same way.
+    if bind_ip != "127.0.0.1" and not body.auth_enabled:
+        raise HTTPException(400, "Refusing to bind beyond loopback without authorization enforcement")
+
+    previous = {"auth_enabled": settings.auth_enabled(), "bind_ip": settings.bind_ip()}
+
+    if body.auth_enabled and not previous["auth_enabled"]:
+        c = _client()  # still unauthenticated at this point
+        try:
+            _ensure_panel_admin(c)
+        except Exception as e:
+            raise HTTPException(500, f"Could not create the panel admin credential: {e}")
+        finally:
+            c.close()
+
+    try:
+        _apply_access(body.auth_enabled, bind_ip)
+        # Prove the panel can still talk to MongoDB before declaring success.
+        c = _client()
+        c.close()
+    except HTTPException as e:
+        # Roll back to the previous posture; a half-applied exposure is the
+        # one state this endpoint must never leave behind.
+        try:
+            _apply_access(previous["auth_enabled"], previous["bind_ip"])
+        except Exception:
+            pass
+        audit.log_action(user, "mongodb.access_change", "mongodb",
+                         {"requested": body.dict(), "error": str(e.detail)}, status="failed")
+        raise HTTPException(500, f"Access change failed and was rolled back: {e.detail}")
+
+    audit.log_action(user, "mongodb.access_change", "mongodb",
+                     {"auth_enabled": body.auth_enabled, "bind_ip": bind_ip, "previous": previous})
+    return {"ok": True, "auth_enabled": body.auth_enabled, "bind_ip": bind_ip}
 
 
 # ── Databases ─────────────────────────────────────────────────────────────────
@@ -392,7 +504,7 @@ async def create_backup(body: BackupRequest, _: User = Depends(require_admin)):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     prefix = f"{body.db}_{ts}" if body.db else f"full_{ts}"
     out_dir = os.path.join(BACKUP_DIR, prefix)
-    cmd = [tool, f"--port={port}", f"--out={out_dir}"]
+    cmd = [tool, f"--port={port}", f"--out={out_dir}", *_tool_auth_args()]
     if body.db:
         if body.db in SYSTEM_DBS:
             raise HTTPException(400, "Cannot backup a system database.")
@@ -420,7 +532,7 @@ async def restore_backup(body: RestoreRequest, _: User = Depends(require_admin))
     if not os.path.isdir(backup_path):
         raise HTTPException(404, f"Backup '{body.name}' not found.")
     port = _get_port()
-    cmd = [tool, f"--port={port}", backup_path]
+    cmd = [tool, f"--port={port}", *_tool_auth_args(), backup_path]
     if body.drop:
         cmd.append("--drop")
     try:
