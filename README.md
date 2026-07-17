@@ -7,7 +7,11 @@ HostPanel package for provisioning and managing MongoDB on the server.
 - Bundles a lean `mongod` 8.0 binary plus `mongodump`/`mongorestore` for ARM64.
 - Databases, users/roles, and backups management from the panel.
 - Connection-string helper with **On-server / SSH tunnel / Direct remote** scopes
-  and `mongosh`/Node/Python/Compass formats.
+  and `mongosh`/Node/Python/Compass formats. Strings carry an explicit
+  `authSource=<user's home db>`, and when authorization is enforced the panel shows
+  the form-based-client rule (set *Authentication Database* to the user's home db —
+  GUI "Database" fields usually only pick what to browse, and clients default the
+  auth db to `admin`).
 - Network access control: authorization enforcement and bind scope, gated so the
   server can never be exposed without credentials.
 

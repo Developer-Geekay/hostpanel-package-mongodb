@@ -42,14 +42,19 @@
       { id: 'remote', label: 'Direct remote' },
     ];
 
+    // authSource is spelled out even though the URI path already implies it:
+    // URI-parsing clients don't need it, but it makes the credential's home
+    // db explicit for anyone transcribing into a form-based client.
     const uri = (host, p, params) =>
-      `mongodb://${user.username}:<password>@${host}:${p}/${user.auth_db}${params ? '?' + params : ''}`;
+      `mongodb://${user.username}:<password>@${host}:${p}/${user.auth_db}?authSource=${user.auth_db}${params ? '&' + params : ''}`;
 
-    // directConnection: stops drivers from re-resolving to the server's own
-    // advertised address (which is loopback on the Pi) and going nowhere.
+    // directConnection only on the tunnel string: through a tunnel some
+    // drivers re-resolve to the server's advertised address and go nowhere.
+    // Standalone direct connections don't need it (and form-based clients
+    // often can't express it).
     const base = scope === 'local' ? uri('127.0.0.1', port)
       : scope === 'tunnel' ? uri('127.0.0.1', tunnelPort, 'directConnection=true')
-      : uri(publicHost, port, 'directConnection=true');
+      : uri(publicHost, port);
 
     const tunnelCmd = `ssh -L ${tunnelPort}:127.0.0.1:${port} <ssh-user>@${publicHost}`;
 
@@ -122,12 +127,26 @@
             <span style=${{ color: 'var(--err)' }}>⚠ Not reachable right now:</span> MongoDB is bound to
             <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>127.0.0.1</code> (loopback only)${authEnabled ? '' : ' and authorization is not enforced'}.
             Exposing it directly to the internet is not recommended — use the SSH tunnel instead. Direct access would require
-            auth enforcement, a wider bindIp, and a router port-forward.
+            auth enforcement, a wider bindIp, and a router port-forward — plus a firewall allow for port ${port}
+            (e.g. <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>ufw allow ${port}/tcp</code>).
           ` : html`
             Direct connection over the network. Make sure port ${port} is firewalled to trusted sources —
             the whole internet scans for open MongoDB ports.
           `)}
         </div>
+
+        ${authEnabled && html`
+          <div style=${{ padding: '8px 16px', background: 'var(--bg-2)', borderTop: '1px solid var(--border)', fontSize: 11.5, color: 'var(--text-3)', lineHeight: 1.5 }}>
+            <span style=${{ fontWeight: 600, color: 'var(--text-2)' }}>GUI clients with separate connection fields</span>
+            (Compass form view, TablePlus, DBeaver, VS Code extensions): the "Database" field usually only picks what to
+            browse — authentication needs its own field. Set
+            <span style=${{ fontFamily: 'var(--font-mono)' }}>Authentication Database</span> /
+            <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>authSource</code> to
+            <code style=${{ background: 'var(--bg-3)', padding: '1px 5px', borderRadius: 3 }}>${user.auth_db}</code>
+            (this user's home database) or authentication fails against the client's default
+            (<span style=${{ fontFamily: 'var(--font-mono)' }}>admin</span>). Keep SSL/TLS off and replica set / SRV empty.
+          </div>
+        `}
       </div>`;
   }
 
