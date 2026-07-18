@@ -196,6 +196,51 @@
 
     // Active item selections
     const activeDb = useMemo(() => databases.find(d => d.name === selectedDbName), [databases, selectedDbName]);
+
+    // Real collection list for the selected database
+    const [dbCollections, setDbCollections] = useState([]);
+    const [dbCollectionsLoading, setDbCollectionsLoading] = useState(false);
+    const [newCollectionName, setNewCollectionName] = useState(null); // null = input hidden
+    const [newCollectionBusy, setNewCollectionBusy] = useState(false);
+
+    const fetchCollections = useCallback(async (dbName) => {
+      setDbCollectionsLoading(true);
+      try {
+        const data = await sdk.fetch('GET', '/cpanelapi/mongodb/databases/' + encodeURIComponent(dbName) + '/collections');
+        setDbCollections(data || []);
+      } catch (e) {
+        setDbCollections([]);
+        toastErr(e.message || 'Failed to load collections');
+      } finally {
+        setDbCollectionsLoading(false);
+      }
+    }, [toastErr]);
+
+    useEffect(() => {
+      if (selectedDbName && dbActiveTab === 'collections') {
+        fetchCollections(selectedDbName);
+      } else {
+        setDbCollections([]);
+      }
+      setNewCollectionName(null);
+    }, [selectedDbName, dbActiveTab, fetchCollections]);
+
+    const handleCreateCollection = async () => {
+      const name = String(newCollectionName || '').trim();
+      if (!name || !activeDb) return;
+      setNewCollectionBusy(true);
+      try {
+        await sdk.fetch('POST', '/cpanelapi/mongodb/databases/' + encodeURIComponent(activeDb.name) + '/collections', { name });
+        ok(`Collection "${name}" created`);
+        setNewCollectionName(null);
+        fetchCollections(activeDb.name);
+        refetchDbs();
+      } catch (e) {
+        toastErr(e.message || 'Failed to create collection');
+      } finally {
+        setNewCollectionBusy(false);
+      }
+    };
     const activeUser = useMemo(() => users.find(u => u.username === selectedUsername), [users, selectedUsername]);
     const activeBackup = useMemo(() => (backupsData.backups || []).find(b => b.name === selectedBackupName), [backupsData, selectedBackupName]);
 
@@ -729,10 +774,29 @@
                 <div style=${{ flex: 1, overflowY: 'auto', padding: 20 }}>
                   ${dbActiveTab === 'collections' && html`
                     <div class="animate-fade-in" style=${{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                      <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <span style=${{ fontSize: 12, color: 'var(--text-3)' }}>${activeDb.collections} collections in database</span>
-                        <button class="btn btn-primary btn-sm" onClick=${() => toastErr('Create collection inside custom app logic')}>+ New Collection</button>
+                      <div style=${{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                        <span style=${{ fontSize: 12, color: 'var(--text-3)' }}>
+                          ${dbCollectionsLoading ? 'Loading collections…' : `${dbCollections.length} collections in database`}
+                        </span>
+                        <div style=${{ display: 'flex', gap: 8 }}>
+                          <button class="btn btn-ghost btn-xs" onClick=${() => fetchCollections(activeDb.name)} disabled=${dbCollectionsLoading}>
+                            ${dbCollectionsLoading ? 'Refreshing…' : '⟳ Refresh'}
+                          </button>
+                          <button class="btn btn-primary btn-sm" onClick=${() => setNewCollectionName('')}>+ New Collection</button>
+                        </div>
                       </div>
+
+                      ${newCollectionName !== null && html`
+                        <div style=${{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <input type="text" value=${newCollectionName} placeholder="collection_name" style=${{ flex: 1 }}
+                                 onInput=${e => setNewCollectionName(e.target.value)}
+                                 onKeyDown=${e => { if (e.key === 'Enter') handleCreateCollection(); }} />
+                          <button class="btn btn-primary btn-sm" onClick=${handleCreateCollection} disabled=${newCollectionBusy || !String(newCollectionName).trim()}>
+                            ${newCollectionBusy ? 'Creating…' : 'Create'}
+                          </button>
+                          <button class="btn btn-ghost btn-sm" onClick=${() => setNewCollectionName(null)} disabled=${newCollectionBusy}>Cancel</button>
+                        </div>
+                      `}
 
                       <div class="card" style=${{ overflow: 'hidden', padding: 0 }}>
                         <table style=${{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
@@ -745,31 +809,22 @@
                             </tr>
                           </thead>
                           <tbody>
-                            ${activeDb.collections === 0 ? html`
+                            ${dbCollectionsLoading ? html`
                               <tr>
-                                <td colSpan="4" style=${{ padding: '20px', textAlign: 'center', color: 'var(--text-3)' }}>No collections found. Populate collections via database client.</td>
+                                <td colSpan="4" style=${{ padding: '20px', textAlign: 'center', color: 'var(--text-3)' }}>Loading collections…</td>
                               </tr>
-                            ` : (() => {
-                              const list = [
-                                { name: 'users', count: Math.ceil(activeDb.size / 15000), size: activeDb.size * 0.25, indexes: 3 },
-                                { name: 'sessions', count: Math.ceil(activeDb.size / 100000), size: activeDb.size * 0.1, indexes: 2 },
-                                { name: 'products', count: Math.ceil(activeDb.size / 4000), size: activeDb.size * 0.35, indexes: 4 },
-                                { name: 'orders', count: Math.ceil(activeDb.size / 8000), size: activeDb.size * 0.25, indexes: 6 },
-                                { name: 'categories', count: 142, size: activeDb.size * 0.05, indexes: 2 }
-                              ].slice(0, activeDb.collections);
-                              // Ensure at least one collection if count is positive
-                              if (list.length === 0 && activeDb.collections > 0) {
-                                list.push({ name: '_init', count: 1, size: 4096, indexes: 1 });
-                              }
-                              return list.map(c => html`
-                                <tr key=${c.name} style=${{ borderBottom: '1px solid var(--border)' }}>
-                                  <td style=${{ padding: '10px 14px', fontFamily: 'var(--font-mono)', color: 'var(--text-1)' }}>${c.name}</td>
-                                  <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${c.count.toLocaleString()}</td>
-                                  <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${fmtSize(c.size)}</td>
-                                  <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${c.indexes}</td>
-                                </tr>
-                              `);
-                            })()}
+                            ` : dbCollections.length === 0 ? html`
+                              <tr>
+                                <td colSpan="4" style=${{ padding: '20px', textAlign: 'center', color: 'var(--text-3)' }}>No collections found. Populate collections via a database client or "+ New Collection".</td>
+                              </tr>
+                            ` : dbCollections.map(c => html`
+                              <tr key=${c.name} style=${{ borderBottom: '1px solid var(--border)' }}>
+                                <td style=${{ padding: '10px 14px', fontFamily: 'var(--font-mono)', color: 'var(--text-1)' }}>${c.name}</td>
+                                <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${c.count == null ? '—' : c.count.toLocaleString()}</td>
+                                <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${c.size == null ? '—' : fmtSize(c.size)}</td>
+                                <td style=${{ padding: '10px 14px', textAlign: 'right', color: 'var(--text-2)' }}>${c.indexes == null ? '—' : c.indexes}</td>
+                              </tr>
+                            `)}
                           </tbody>
                         </table>
                       </div>
