@@ -6,6 +6,8 @@ HostPanel package for provisioning and managing MongoDB on the server.
 
 - Bundles a lean `mongod` 8.0 binary plus `mongodump`/`mongorestore` for ARM64.
 - Databases, users/roles, and backups management from the panel.
+- Per-database collection browser (real `collStats`: docs, size, indexes) with refresh and
+  create-collection.
 - Connection-string helper with **On-server / SSH tunnel / Direct remote** scopes
   and `mongosh`/Node/Python/Compass formats. Strings carry an explicit
   `authSource=<user's home db>`, and when authorization is enforced the panel shows
@@ -52,6 +54,8 @@ GET    /status                    running, version, port, bind_ip, auth_enabled
 GET    /access                    current auth/bind posture
 PUT    /access                    { auth_enabled, bind_ip }  (admin)
 GET    /databases  · POST /databases · DELETE /databases/{name} · POST /databases/{name}/clear
+GET    /databases/{name}/collections      real per-collection stats (collStats)
+POST   /databases/{name}/collections      { name }  create a collection
 GET    /users · POST /users · DELETE /users/{auth_db}/{username} · password/roles routes
 GET    /backups · POST /backups · POST /backups/restore · GET /backups/{name}/download
 ```

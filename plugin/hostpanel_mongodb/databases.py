@@ -252,6 +252,62 @@ async def list_databases(_: User = Depends(require_admin)):
         c.close()
 
 
+@router.get("/databases/{name}/collections")
+async def list_collections(name: str, _: User = Depends(require_admin)):
+    if not DB_NAME_RE.match(name) or name in SYSTEM_DBS:
+        raise HTTPException(400, "Invalid database name.")
+    c = _client()
+    try:
+        db = c[name]
+        result = []
+        for coll in sorted(db.list_collection_names()):
+            entry = {"name": coll, "count": None, "size": None, "indexes": None}
+            try:
+                stats = db.command("collstats", coll)
+                entry["count"] = stats.get("count", 0)
+                entry["size"] = stats.get("size", 0)
+                entry["indexes"] = stats.get("nindexes", 0)
+            except Exception:
+                # views and timeseries can refuse collstats — list them anyway
+                pass
+            result.append(entry)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    finally:
+        c.close()
+
+
+COLLECTION_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,119}$")
+
+
+class CreateCollectionRequest(BaseModel):
+    name: str
+
+
+@router.post("/databases/{name}/collections")
+async def create_collection(name: str, body: CreateCollectionRequest, _: User = Depends(require_admin)):
+    if not DB_NAME_RE.match(name) or name in SYSTEM_DBS:
+        raise HTTPException(400, "Invalid database name.")
+    coll = body.name.strip()
+    if not COLLECTION_NAME_RE.match(coll) or "$" in coll or coll.startswith("system."):
+        raise HTTPException(400, "Invalid collection name. Use letters, numbers, dot, dash, underscore (max 120 chars).")
+    c = _client()
+    try:
+        if coll in c[name].list_collection_names():
+            raise HTTPException(409, f"Collection '{coll}' already exists.")
+        c[name].create_collection(coll)
+        return {"ok": True, "name": coll}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    finally:
+        c.close()
+
+
 class CreateDbRequest(BaseModel):
     name: str
 
