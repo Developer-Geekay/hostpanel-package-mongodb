@@ -571,7 +571,7 @@
               🐚 Mongo Shell
             </button>
             <button class="btn btn-primary btn-sm" onClick=${triggerAddView} disabled=${statusData && !statusData.running}>
-              + New Database
+              + New ${activeCategory === 'databases' ? 'Database' : activeCategory === 'users' ? 'User' : 'Backup'}
             </button>
           </div>
         </div>
